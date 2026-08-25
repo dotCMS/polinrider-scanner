@@ -75,6 +75,30 @@ while IFS= read -r f; do
     hit "suspicious .env with base64-looking value: $f"
 done < <(find "${SCAN_DIRS[@]}" -maxdepth 4 -name '.env' -not -path '*/node_modules/*' 2>/dev/null)
 
+# Campaign build marker (DPRK A#-####-# scheme) as a HARD IOC:
+#   global.i="A9-3727-2"        obfuscator.io build
+#   global['!']='9-3727-2'      older _$_ shuffle build
+# Matched as a PATTERN, not a literal, so it survives build-number rotation.
+# Promoted out of the informational S1c on evidence: against the one genuinely
+# infected file recovered in this incident (a karma.conf.js of ~31KB in a
+# private org repo; see the internal IR record) every other
+# detection path missed and this was the ONLY rule that fired - S1c could not
+# change the verdict, so the scanner reported CLEAN on a real implant.
+# It is regex, so it cannot ride in SIGS (those are fixed-string -F).
+BUILD_MARKER_RE="global(\.i|\[.!.\])[[:space:]]*=[[:space:]]*[\"']A?[0-9]-[0-9]{4}-[0-9]"
+while IFS= read -r f; do
+  [ -n "$f" ] && hit "campaign build marker (A#-####-#) in: $f"
+done < <(
+  if [ "$GREP_ENGINE" = "rg" ]; then
+    rg -l --no-messages --hidden -g '!node_modules' -g '!.git' -g '!*.min.js' \
+       -g '*.{js,mjs,cjs,ts,mts}' -e "$BUILD_MARKER_RE" "${SCAN_DIRS[@]}" 2>/dev/null
+  else
+    grep -rIlE --exclude-dir=node_modules --exclude-dir=.git \
+      --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' \
+      "$BUILD_MARKER_RE" "${SCAN_DIRS[@]}" 2>/dev/null
+  fi
+)
+
 # ---- 1b. Oversized config files: verify content, not just size ----------------
 section "1b. Oversized config files (>2500 bytes) - content-verified"
 # Classify each oversized config:
@@ -83,15 +107,38 @@ section "1b. Oversized config files (>2500 bytes) - content-verified"
 #                single lines, hex/base64 blobs, string-shuffle calls) but no exact sig
 #   OK        = large but ordinary config (prints as info only)
 classify_config() {  # $1 = file
-  local f="$1"
+  local f="$1" run big lines
   grep -qF 'rmcej%otb%' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
   grep -qF 'wuqktamceigynzbosdctpusocrjhrflovnxrt' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
   grep -qF 'atob(process.env.AUTH_API_KEY' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
-  # trailing whitespace padding (implant hides after legit content + long space runs)
-  if tail -c 2000 "$f" 2>/dev/null | grep -qE ' {80,}'; then echo "SUSPICIOUS-pad"; return; fi
-  # single line >800 chars with almost no spaces = single-token obfuscation;
-  # legit long lines (requires/serialized config, usually spaced) pass
-  if awk 'length($0)>800 && gsub(/ /," ")<=5 {found=1} END{exit !found}' "$f" 2>/dev/null; then echo "SUSPICIOUS-longline"; return; fi
+  grep -qE "$BUILD_MARKER_RE" "$f" 2>/dev/null && { echo "INFECTED-marker"; return; }
+  # Whitespace padding used to push the payload past the right edge of a diff
+  # view. WHOLE FILE, not `tail -c 2000`: in the real sample the ~5,000 spaces of
+  # padding sit at the START of the payload, so the last 2000 bytes are pure
+  # payload with no spaces at all and the old tail-only test missed it.
+  if awk '{ if (match($0,/[[:space:]]{200,}/)) found=1 } END{ exit !found }' "$f" 2>/dev/null; then
+    echo "SUSPICIOUS-pad"; return
+  fi
+  # A monster unbroken token inside an otherwise hand-written file.
+  # The old rule was `length($0)>800 && gsub(/ /," ")<=5`, which counted spaces
+  # across the ENTIRE line - the real sample carries ~5,000 padding spaces on
+  # that same line, so the <=5 guard rejected it. The rule was inverted against
+  # exactly this evasion. Measure the longest unbroken NON-SPACE run instead,
+  # then separate injection from minification structurally: a minified bundle is
+  # huge on most of its lines; an injected config is normal everywhere except
+  # one. (Same rule as polinrider-file-detect.sh, validated against both real
+  # payload builds, clean configs, a large legit eslint.config.mjs, and real
+  # minified bundles - hence the *.min.js exclusion on the find below.)
+  set -- $(awk '
+    { n=split($0, parts, /[[:space:]]+/); m=0
+      for (i=1;i<=n;i++) if (length(parts[i])>m) m=length(parts[i])
+      if (m>MAX) MAX=m
+      if (length($0)>800) BIG++ }
+    END { print MAX+0, BIG+0, NR+0 }' "$f" 2>/dev/null)
+  run=${1:-0}; big=${2:-0}; lines=${3:-0}
+  if [ "$run" -gt 800 ] && [ "$lines" -gt 5 ] && [ "$big" -le 2 ]; then
+    echo "SUSPICIOUS-longline"; return
+  fi
   # long hex / base64-ish literals (>=100 chars of [A-Za-z0-9+/=_-])
   if grep -qE '[A-Za-z0-9+/=_-]{100,}' "$f" 2>/dev/null; then echo "SUSPICIOUS-blob"; return; fi
   # String.raw / string-shuffle style arrays with many quoted single chars
@@ -105,16 +152,18 @@ while IFS= read -r f; do
   [ "$sz" -gt 2500 ] || continue
   case $(classify_config "$f") in
     INFECTED-sig)        hit "INFECTED CONFIG (campaign signature present, ${sz}B): $f" ;;
+    INFECTED-marker)     hit "INFECTED CONFIG (campaign build marker A#-####-#, ${sz}B): $f" ;;
     SUSPICIOUS-pad)      hit "suspicious config (${sz}B, trailing whitespace padding): $f" ;;
-    SUSPICIOUS-longline) hit "suspicious config (${sz}B, >800-char line = possible obfuscation): $f" ;;
+    SUSPICIOUS-longline) hit "suspicious config (${sz}B, >800-char unbroken token on 1-2 lines of ${sz}B = injected payload shape): $f" ;;
     SUSPICIOUS-blob)     hit "suspicious config (${sz}B, long encoded blob): $f" ;;
     SUSPICIOUS-shuffle)  hit "suspicious config (${sz}B, string-shuffle pattern): $f" ;;
     OK)                  echo -e "${YEL}[i] large config, content looks normal (${sz}B): $f${NC}" ;;
   esac
 done < <(find "${SCAN_DIRS[@]}" -maxdepth 5 \( -name 'postcss.config.*' -o -name 'tailwind.config.*' \
   -o -name 'vite.config.*' -o -name 'eslint.config.*' -o -name 'next.config.*' \
-  -o -name 'jest.config.*' -o -name 'babel.config.*' -o -name 'config.js' \) \
-  -not -path '*/node_modules/*' \
+  -o -name 'jest.config.*' -o -name 'babel.config.*' -o -name 'config.js' \
+  -o -name 'karma.conf.*' -o -name '*.conf.js' \) \
+  -not -path '*/node_modules/*' -not -name '*.min.js' \
   -not -path '*/.cache/*' -not -path '*/Library/Caches/*' -not -path '*/.bun/*' \
   -not -path '*/.cursor/*' -not -path '*/.vscode*' \
   -not -name '*.timestamp-*.mjs' -not -name '*.timestamp-*.mjs.*' 2>/dev/null)
@@ -132,9 +181,15 @@ section "1b2. Fake font payload files (no valid font header)"
 FONT_MAGICS_HEX='774f4632 774f4646 00010000 4f54544f 74727565 74797031'
 check_fake_font() {  # $1 = file
   local f="$1" magic sz m
+  sz=$(wc -c < "$f" 2>/dev/null | tr -dc '0-9'); sz=${sz:-0}
+  # FP-1 (confirmed on a clean host 2026-08-25): a file under 4 bytes has no
+  # magic to compare - `od -N4` returns an empty string, which matches no entry
+  # in FONT_MAGICS_HEX, so every such file used to be flagged. It also cannot
+  # carry a payload. Real sources: unfetched Git LFS pointers, partial clones,
+  # zero-byte build placeholders under dist/.
+  [ "$sz" -lt 4 ] && return
   magic=$(od -An -tx1 -N4 "$f" 2>/dev/null | tr -d ' \n')
   for m in $FONT_MAGICS_HEX; do [ "$magic" = "$m" ] && return; done
-  sz=$(wc -c < "$f" 2>/dev/null | tr -dc '0-9'); sz=${sz:-0}
   hit "fake $(basename "$f" | sed 's/.*\.//' | tr a-z A-Z) payload (no known font magic bytes, ${sz}B): $f"
 }
 while IFS= read -r f; do check_fake_font "$f"; done < <(find "${SCAN_DIRS[@]}" -maxdepth 6 \
@@ -154,8 +209,10 @@ is_scan_scope() {  # keep repo checkouts, drop caches/extensions/app-support
     *) return 0 ;;
   esac
 }
+# NOTE: the A#-####-# build marker used to live here. It is now a HARD IOC in
+# section 1 + classify_config (see the evidence in the S1 comment); keeping it
+# here as well would only double-report it as an unactionable [i] line.
 REGEX_PATS=(
-  'global\.[a-zA-Z]+[[:space:]]*=[[:space:]]*["'"'"']A[0-9]+-'
   'helloipbot'
   'publicnode\.com|bsc-dataseed|1rpc\.io|drpc\.org|blockscout'
   'Sec-V:'
@@ -210,9 +267,26 @@ is_benign_tmp_exe() {
     *) return 1 ;;
   esac
 }
+# FP-2 (confirmed on a clean host 2026-08-25): yarn writes
+# $TMPDIR/yarn--<epoch>-<random>/{node,yarn} on EVERY invocation - 158B and 312B
+# /bin/sh wrappers holding a single exec line. Ten of them on one clean host,
+# all counting toward COMPROMISED. Content-check the SHAPE rather than chase
+# each tool's temp-dir naming convention: a real dropper is a binary or a large
+# obfuscated script and matches neither the size nor the exec-only body.
+is_tool_shim() {  # $1 = file; 0 = tiny #! wrapper whose only work is exec
+  local f="$1" sz
+  sz=$(wc -c < "$f" 2>/dev/null | tr -dc '0-9'); sz=${sz:-0}
+  [ "$sz" -lt 1024 ] || return 1
+  head -c 2 "$f" 2>/dev/null | grep -q '#!' || return 1
+  # every line that is not blank and not a comment must be an exec
+  grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | \
+    grep -qvE '^[[:space:]]*exec[[:space:]]' && return 1
+  return 0
+}
 find "$TD" -maxdepth 2 -type f -perm -u+x -mtime -180 2>/dev/null | \
   while IFS= read -r f; do
     is_benign_tmp_exe "$f" && continue
+    is_tool_shim "$f" && continue
     hit "executable in tmpdir (review): $f"
   done
 
@@ -275,12 +349,31 @@ ls -lt "$HOME/.ssh" 2>/dev/null | head -10
 # ---- 6. Connectivity evidence --------------------------------------------------
 section "6. Connectivity evidence (best-effort)"
 BAD_HOSTS='auth-confirm-eight.vercel.app auth-rho-dun.vercel.app data-kappa.vercel.app api.trongrid.io'
-for h in $BAD_HOSTS; do
-  if [ "$(uname -s)" = "Darwin" ] && command -v log >/dev/null; then
-    log show --last 30d --predicate 'process == "mDNSResponder"' --style compact 2>/dev/null | \
-      grep -q "$h" && hit "macOS DNS cache shows resolution of $h in last 30d"
+# ONE `log show` pass, not one per host. `log show --last 30d` walks the whole
+# unified log and takes minutes; running it once per host made the scanner look
+# hung and made the fixture suites untestable. Cap it with a timeout so a slow
+# or huge log store degrades to "skipped" instead of stalling a fleet run.
+if [ "$(uname -s)" = "Darwin" ] && command -v log >/dev/null 2>&1; then
+  DNSLOG=$(mktemp "${TMPDIR:-/tmp}/polinrider_dns.XXXXXX")
+  BAD_RE=$(echo "$BAD_HOSTS" | tr ' ' '\n' | sed 's/\./\\./g' | paste -sd'|' -)
+  ( log show --last 30d --predicate 'process == "mDNSResponder"' --style compact 2>/dev/null \
+      | grep -E "$BAD_RE" > "$DNSLOG" ) &
+  logpid=$!
+  waited=0
+  while kill -0 "$logpid" 2>/dev/null && [ "$waited" -lt "${POLINRIDER_DNS_TIMEOUT:-120}" ]; do
+    sleep 2; waited=$((waited + 2))
+  done
+  if kill -0 "$logpid" 2>/dev/null; then
+    kill "$logpid" 2>/dev/null
+    info "DNS cache check timed out after ${waited}s - SKIPPED (raise POLINRIDER_DNS_TIMEOUT to extend)"
+  else
+    for h in $BAD_HOSTS; do
+      grep -qF "$h" "$DNSLOG" 2>/dev/null && \
+        hit "macOS DNS cache shows resolution of $h in last 30d"
+    done
   fi
-done
+  rm -f "$DNSLOG"
+fi
 info "MOST RELIABLE: search corporate proxy / DNS / firewall logs for:"
 echo "     auth-confirm-eight.vercel.app, auth-rho-dun.vercel.app, data-kappa.vercel.app,"
 echo "     api.trongrid.io, aptos RPC hosts, bsc-dataseed.binance.org, and any *.vercel.app"
@@ -289,7 +382,7 @@ echo "     hits from dev boxes or CI runners during npm test/build steps."
 # ---- Summary --------------------------------------------------------------------
 N=$(hitcount)
 # strip whitespace/newlines so [ -gt ] always gets a single clean integer
-HIGH=$(grep -cE 'stage-3 dropper path exists|KNOWN-BAD|executable in tmpdir|DNS cache shows|suspicious LaunchAgent|suspicious autostart|suspicious user service|auto-run task|executing odd file|runs node on non-JS|MALICIOUS-LOOKING git hook|INFECTED CONFIG|fake (WOFF2?) payload' "$FINDINGS" 2>/dev/null | tr -dc '0-9')
+HIGH=$(grep -cE 'stage-3 dropper path exists|KNOWN-BAD|executable in tmpdir|DNS cache shows|suspicious LaunchAgent|suspicious autostart|suspicious user service|auto-run task|executing odd file|runs node on non-JS|MALICIOUS-LOOKING git hook|INFECTED CONFIG|campaign build marker|fake (WOFF2?) payload' "$FINDINGS" 2>/dev/null | tr -dc '0-9')
 HIGH=${HIGH:-0}
 N=${N%%[!0-9]*}; N=${N:-0}
 echo
