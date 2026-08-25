@@ -3,7 +3,9 @@
 # Read-only: collects indicators, changes nothing.
 # Uses ripgrep automatically if `rg` is on PATH (much faster); falls back to grep.
 # Requires bash (not sh/dash/zsh). Run with: bash polinrider_scan.sh
-# Usage: ./polinrider_scan.sh | tee scan_results_$(hostname)_$(date +%Y%m%d).log
+# Usage: bash polinrider_scan.sh [target_dir] | tee scan_results_$(hostname)_$(date +%Y%m%d).log
+#   target_dir: directory to scan (repo/project tree); defaults to $PWD.
+#   Sections 2-5 are host-wide checks and always run regardless of target_dir.
 set -u
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "ERROR: run with bash, not sh: bash $0" >&2
@@ -24,12 +26,11 @@ section "1. Loader signatures (repo clones, project dirs)"
 # NOTE: third signature is the implant's exact usage (atob(process.env.AUTH_API_KEY),
 # fixed-string) - a bare 'AUTH_API_KEY' key name collides with docs/caches and FP'd.
 SIGS=('rmcej%otb%' 'wuqktamceigynzbosdctpusocrjhrflovnxrt' 'atob(process.env.AUTH_API_KEY')
-SCAN_DIRS=("$PWD" "$HOME")
-for d in "$HOME/src" "$HOME/projects" "$HOME/code" "$HOME/work" "$HOME/dev"; do
-  [ -d "$d" ] && SCAN_DIRS+=("$d")
-done
-# dedupe (e.g. when run from $HOME or a subdir already covered)
-SCAN_DIRS=($(printf '%s\n' "${SCAN_DIRS[@]}" | awk '!seen[$0]++'))
+SCAN_DIRS=("${1:-$PWD}")
+if [ ! -d "${SCAN_DIRS[0]}" ]; then
+  echo "ERROR: target directory not found: ${SCAN_DIRS[0]}" >&2
+  exit 2
+fi
 
 # ripgrep if available (much faster, respects binary/ignore heuristics)
 GREP_ENGINE="grep"
