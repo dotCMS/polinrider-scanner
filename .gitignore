@@ -1,0 +1,25 @@
+# Secrets - never commit (contains live keys if populated)
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / AI-tool session data
+.idea/
+.vscode/
+*.swp
+*.swo
+.clinerules/
+.specstory/
+
+# IR working artifacts
+scan_results_*.log
+scan_*.log
+polinrider_findings.*
+
+# Test fixtures / temp output
+/tmp/
+*.log
