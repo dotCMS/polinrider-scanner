@@ -23,7 +23,7 @@ done
 
 echo
 echo "== scanner section 1b output =="
-cd "$FIX" && bash /workspace/polinrider_scan.sh 2>/dev/null | sed -n '/1b\. Oversized/,/^$/p'
+bash "$(dirname "$0")/polinrider_scan.sh" "$FIX" 2>/dev/null | sed -n '/1b\. Oversized/,/^$/p'
 
 echo "== verdict =="
-cd "$FIX" && bash /workspace/polinrider_scan.sh 2>/dev/null | grep -E 'VERDICT'
+bash "$(dirname "$0")/polinrider_scan.sh" "$FIX" 2>/dev/null | grep -E 'VERDICT'

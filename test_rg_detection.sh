@@ -45,7 +45,7 @@ else
   exit 1
 fi
 
-# End-to-end: run the real scanner from the fixture dir and check the summary
+# End-to-end: run the real scanner against the fixture dir and check the summary
 echo
 echo "== end-to-end scanner run =="
-cd "$FIX" && bash /workspace/polinrider_scan.sh 2>/dev/null | sed -n '/RESULT:/,$p'
+bash "$(dirname "$0")/polinrider_scan.sh" "$FIX" 2>/dev/null | sed -n '/RESULT:/,$p'

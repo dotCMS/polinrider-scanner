@@ -24,11 +24,13 @@ Read-only sweep of Linux/macOS developer machines and CI runners:
 ## Usage
 
 ```bash
-bash polinrider_scan.sh | tee scan_$(hostname)_$(date +%F).log
+bash polinrider_scan.sh [target_dir] | tee scan_$(hostname)_$(date +%F).log
 ```
 
+- `target_dir` (optional): directory to scan (repo/project tree); defaults to `$PWD`
 - Auto-uses `rg` (ripgrep) if on PATH; falls back to grep
-- Scans `$PWD`, `$HOME`, and common project dirs
+- Sections 1/1b/1c/4 (signatures, configs, fonts, tasks/hooks) scan `target_dir`;
+  sections 2/3/5 (droppers, persistence, credential stores) are always host-wide
 - Exit codes: `0` = CLEAN (host-side), `2` = SUSPECT, `1` = COMPROMISED
 - Final line `VERDICT: <value>` is grep-friendly for fleet automation
 

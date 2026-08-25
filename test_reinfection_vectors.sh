@@ -17,7 +17,7 @@ printf '{"tasks":[{"type":"shell","command":"node build.js"}]}\n' > "$FIX/proj/.
 printf '{"tasks":[{"command":"node _.woff2"}]}\n'     > "$FIX/proj/.vscode/tasks.json"
 printf '{"tasks":[{"command":"node fonts/logo.png"}]}\n' > "$FIX/proj/.vscode/tasks2.json"
 
-OUT=$(cd "$FIX/proj" && bash /workspace/polinrider_scan.sh 2>/dev/null)
+OUT=$(bash "$(dirname "$0")/polinrider_scan.sh" "$FIX/proj" 2>/dev/null)
 
 echo "== fake-font detections =="
 echo "$OUT" | grep -E 'fake (WOFF2|WOFF)' | sed "s|$FIX/proj/||"
