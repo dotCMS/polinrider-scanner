@@ -43,7 +43,7 @@ git clone/`git show` forensics on both repos → `base64 -d` C2 decode → curl 
 | File | Purpose |
 |---|---|
 | `incident-report-polinrider.md` | Full incident report (exec summary, timeline, tech analysis, verification chain, remediation) |
-| `polinrider_scan.sh` | Host detection scanner, Linux/macOS, read-only. Pure ASCII. Auto-uses ripgrep; scans `$PWD`+`$HOME`; §1 exact hard-IOC signatures, §1b content-classified configs, §1b2 fake-font payloads, §1c informational-only family patterns scoped to project trees; stage-3 + `/tmp/.npm` staging; verdicts COMPROMISED(1)/SUSPECT(2)/CLEAN(0) driven by hard IOCs only. **Current: 323 lines, md5 `bc4c57bb3fc4ce0d2f0415dc8f6929fe`** |
+| `polinrider_scan.sh` | Host detection scanner, Linux/macOS, read-only. Pure ASCII. Auto-uses ripgrep; scans the target dir given as arg 1 (default `$PWD`) plus host-wide sections 2-6; §1 exact hard-IOC signatures + the `A#-####-#` build marker, §1b content-classified configs, §1b2 fake-font payloads, §1c informational-only family patterns scoped to project trees; stage-3 + `/tmp/.npm` staging; verdicts COMPROMISED(1)/SUSPECT(2)/CLEAN(0) driven by hard IOCs only. **Current: 420 lines, md5 `eade63b011f06dc0432dbf1c307e6ce9`** |
 | `test_rg_detection.sh` | Fixture test for the scanner's rg path (found 3 real bugs — see §5) |
 | `test_config_classification.sh` | Fixture test for oversized-config content classification (§5 item 7) |
 | `test_reinfection_vectors.sh` | Fixture test for fake-font payloads (1b2) + node-on-non-JS VS Code tasks (sec 4), incl. negative controls |
@@ -64,7 +64,38 @@ git clone/`git show` forensics on both repos → `base64 -d` C2 decode → curl 
 
 10. Additional detections (2026-08-25, threat-intel informed, validated by IR session): (a) sec 1b2 fake-font payload check - any `*.woff2`/`*.woff` without the `wOF2`/`wOFF` magic bytes is flagged and counts toward COMPROMISED (campaign drops JS disguised as fonts, run via `node _.woff2` from VS Code tasks); (b) sec 4 catches `node` run on ANY non-JS-extension file in tasks.json (generalized beyond .woff2); (c) `config.js` added to oversized-config scan list. Validated by new `test_reinfection_vectors.sh` fixture suite. IR-session fix during validation: tasks.json find pattern widened to `tasks*.json` (original only matched exact `tasks.json`, missing variants). One review note: fake-font check is a strong signal (real fonts always have magic bytes) but not campaign-specific - any corrupted "font" also trips it; acceptable given rarity in project trees.
 
-**Newest md5: `bc4c57bb3fc4ce0d2f0415dc8f6929fe` (323 lines)** - re-copy before fleet runs.
+11. Triage round 3 (2026-08-25, after a run on a second engineer workstation). Two rules were returning COMPROMISED on a verified-clean host, and — worse — the noise was *masking a miss*: on the real infected sample the verdict was COMPROMISED only because of these FPs, with zero hits on the file itself. Fixing the FPs alone would have turned that sample CLEAN.
+
+    **False positives removed**
+    - (a) §1b2 `check_fake_font()`: `od -An -tx1 -N4` on a file under 4 bytes returns an empty string, which matches no entry in `FONT_MAGICS_HEX`, so every such file was flagged. Real sources: unfetched Git LFS pointers, partial clones, zero-byte build placeholders under `dist/`. Fixed with a `[ "$sz" -lt 4 ] && return` guard *before* the magic comparison — a file that short cannot carry a payload.
+    - (b) §2 tmpdir executables: yarn writes `$TMPDIR/yarn--<epoch>-<random>/{node,yarn}` on **every** invocation — 158 B and 312 B `/bin/sh` wrappers holding a single `exec` line. Ten of them on one clean host, all counting toward COMPROMISED. Fixed with `is_tool_shim()`, which content-checks the *shape* (under 1 KB, starts with `#!`, every non-comment line is an `exec`) rather than chasing each tool's temp-dir naming convention. A real dropper is a binary or a large obfuscated script and matches neither test.
+    - Measured A/B on that host, empty target dir: **before 10 findings → COMPROMISED; after 0 → CLEAN.** With a `dist/` tree of fonts added: before 13 → COMPROMISED; after 1, the genuinely disguised JS payload.
+
+12. Detection gaps closed in the same round (the reason the FP fix could not ship alone). Positive controls: both real payload builds recovered from the same `karma.conf.js` in a private org repository (repo, path and commit SHAs withheld from the public copy of this document — see the internal IR record). Build **A** 31,010 B, obfuscator.io toolmarks; build **B** 6,350 B, older `_$_` shuffle. Both 33 lines; longest unbroken non-space run 2,977 and **224** respectively.
+    - (a) **`karma.conf.*` and `*.conf.js` added to the §1b `find`.** The real infected file was `karma.conf.js` — it was never in the list, so §1b never even opened it.
+    - (b) **`SUSPICIOUS-longline` space guard was inverted against the actual evasion.** The old rule was `length($0)>800 && gsub(/ /," ")<=5`, counting spaces across the *entire* line; the payload line carries ~5,000 padding spaces, so the `<=5` guard rejected it. Now measures the longest unbroken **non-space run** and separates injection from minification structurally: run >800 chars **and** at most 2 lines that long **and** more than 5 lines total. Same rule as `polinrider-file-detect.sh`. `*.min.js` excluded from the find, or `lodash.min.js` trips it.
+    - (c) **`SUSPICIOUS-pad` now scans the whole file** (`[[:space:]]{200,}`) instead of `tail -c 2000 | grep ' {80,}'`. In the real sample the padding sits at the *start* of the payload, so the last 2000 bytes are pure payload with no spaces at all.
+    - (d) **The `A#-####-#` build marker is now a hard IOC**, promoted out of the informational §1c per the evidence: it was the *only* rule that fired on build A, and §1c cannot change the verdict. Two paths, both pinned by fixtures: a size-independent regex sweep in §1 over `*.{js,mjs,cjs,ts,mts}`, and an `INFECTED-marker` branch in `classify_config`. Matched as the pattern `global(\.i|\[.!.\])\s*=\s*["']A?[0-9]-[0-9]{4}-[0-9]` so it survives build-number rotation and covers both spellings (`global.i="A9-3727-2"` and `global['!']='9-3727-2'`). Removed from `REGEX_PATS` so it is not also double-reported as an unactionable `[i]`.
+    - **Note on (d): this is load-bearing for the older build.** Its longest unbroken non-space run is only 224 chars, so the structural rule in (b) does *not* catch it. The marker is the only structural signal on that variant.
+    - Measured A/B: build A before → 2 informational `[i]` lines and **no hit on the file at all**; after → `campaign build marker` + `INFECTED CONFIG`. Build B before → 2 signature hits, §1b never scanned it; after → signatures + `INFECTED CONFIG`.
+
+13. Usability fix, same round: §6 ran `log show --last 30d` **once per IOC host** (4×). Each call walks the whole unified log and takes minutes, so the scanner looked hung and the fixture suites could not complete — a single fixture run exceeded 5 minutes. Now one `log show` pass, grepped for all hosts, bounded by `POLINRIDER_DNS_TIMEOUT` (default 120 s) so a huge log store degrades to a reported SKIP instead of stalling a fleet run.
+
+14. Fixture suites, same round. `test_config_classification.sh` had **no assertions at all** — it printed classifications and always exited 0. When the pad and longline rules were rewritten, both of its fixtures silently stopped exercising the rule they were written for and the suite still "passed". Rewritten with 10 assertions and a comment on each fixture naming the rule it pins, including a replica of the real evasion shape (payload appended behind ~5,000 spaces in an otherwise normal multi-line config). `test_rg_detection.sh` hard-failed wherever no `rg` **binary** exists — note `rg` is often only a shell function (Claude Code ships one), so `command -v rg` can succeed in an interactive zsh and fail inside the scanner's bash; it now tests whichever engine the scanner will actually pick and skips only the rg-specific comparison. Its signature array was also still the stale bare `AUTH_API_KEY`; it now matches the scanner and carries an explicit regression guard for item 8a.
+
+**Newest md5: `eade63b011f06dc0432dbf1c307e6ce9` (420 lines)** - re-copy before fleet runs.
+
+### Version drift warning (resolved 2026-08-25)
+
+This document previously claimed the newest scanner was **323 lines / md5 `bc4c57bb3fc4ce0d2f0415dc8f6929fe`**. That artifact does not exist in git history at all — it was an in-session copy that predates publication. The real lineage is:
+
+| Commit | Lines | md5 | Note |
+|---|---|---|---|
+| `bf6edf2` | 326 | `3db8cc8b24ebdc155dc4fef8ddaf522f` | initial publish; scans `$PWD`+`$HOME` |
+| `9af7ad6` | 327 | `6514f1862abb9a23ef34c6183703f842` | target dir as arg 1 |
+| working tree | 420 | `eade63b011f06dc0432dbf1c307e6ce9` | items 11-14 above |
+
+**Trust `git rev-parse origin/main`, not a pasted md5.** Copies handed around out of band go stale in a way that matters: the 326-line copy still scans all of `$HOME`, which multiplies the FP surface fixed in item 11.
 
 ## 6. Scanner result on reference host (engineer workstation, 2026-08-25)
 
