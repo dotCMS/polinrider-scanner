@@ -212,25 +212,38 @@ is_scan_scope() {  # keep repo checkouts, drop caches/extensions/app-support
 # NOTE: the A#-####-# build marker used to live here. It is now a HARD IOC in
 # section 1 + classify_config (see the evidence in the S1 comment); keeping it
 # here as well would only double-report it as an unactionable [i] line.
+# NOTE on 'Sec-V': the bytes in the payload are the QUOTED object key 'Sec-V':
+# so the quote is part of the indicator. The pattern here used to be Sec-V:
+# without it, which matches zero real payloads.
 REGEX_PATS=(
   'helloipbot'
   'publicnode\.com|bsc-dataseed|1rpc\.io|drpc\.org|blockscout'
-  'Sec-V:'
+  "'Sec-V'"
 )
+# The alternation is built from the array. It used to be spelled out as
+# ${REGEX_PATS[0]}|...|${REGEX_PATS[3]} against a 3-element array: under `set -u`
+# that is an unbound variable, the subshell died before grep ran, and section 1c
+# reported nothing on every host without a ripgrep BINARY (rg is frequently only
+# a shell function, so `command -v rg` succeeds in zsh and fails in this script).
+# A silent empty result here is indistinguishable from a clean host.
+REGEX_ALT=$(IFS='|'; printf '%s' "${REGEX_PATS[*]}")
 while IFS= read -r f; do
   is_scan_scope "$f" || continue
   echo -e "${YEL}[i] loader-family pattern (verify against hard IOCs): $f${NC}"
 done < <(
   for d in "${SCAN_DIRS[@]}"; do
     patargs=(); for p in "${REGEX_PATS[@]}"; do patargs+=(-e "$p"); done
+    # stderr is kept: an engine that fails here must not read as "no findings".
     if [ "$GREP_ENGINE" = "rg" ]; then
       rg -l --no-messages --hidden -g '!node_modules' -g '!.git' \
-         -g '*.{js,mjs,cjs,ts,mts}' "${patargs[@]}" "$d" 2>/dev/null
+         -g '*.{js,mjs,cjs,ts,mts}' "${patargs[@]}" "$d"
     else
       grep -rIlE --exclude-dir=node_modules --exclude-dir=.git \
         --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' \
-        "${REGEX_PATS[0]}|${REGEX_PATS[1]}|${REGEX_PATS[2]}|${REGEX_PATS[3]}" "$d" 2>/dev/null
+        "$REGEX_ALT" "$d"
     fi
+    rc=$?
+    [ $rc -gt 1 ] && echo "ENGINE ERROR in section 1c (rc=$rc) - not a clean result" >&2
   done | sort -u
 )
 # obfuscator.io shape: _0x hex array AND while(!![]) co-occurring in a PROJECT file.
