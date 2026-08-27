@@ -7,6 +7,15 @@
 
 ---
 
+> **This is the public copy of this document.** Repository identifiers, commit
+> SHAs, and the credentials exposed during the investigation are deliberately
+> withheld and live only in the internal IR record. Remediation status stated
+> here is a snapshot at the document's date, not current state. Before editing:
+> do not reintroduce a private repo name, a commit SHA, or a list of exposed
+> credentials, and check with `grep` after any find-and-replace — an earlier
+> pass left a full 40-character SHA inside a link whose repo name had been
+> replaced.
+
 ## 1. Executive Summary
 
 Two GitHub repositories were compromised with an identical malicious implant, part of a publicly documented DPRK/Lazarus Group supply-chain campaign tracked as **PolinRider** (Contagious Interview / Famous Chollima cluster). The attacker force-pushed commits containing a staged JavaScript loader hidden inside legitimate-looking changes. When any developer or CI system runs `npm test` or a build that loads the infected config/source file, the loader fetches a remote payload and executes it via `eval()` — resulting in credential theft (SSH keys, cloud/npm tokens, browser data, crypto wallets) and potential deployment of the InvisibleFerret backdoor. The C2 endpoint used against the affected organization was taken offline by Vercel, but the campaign is active and rotates infrastructure.
@@ -14,8 +23,8 @@ Two GitHub repositories were compromised with an identical malicious implant, pa
 
 | Repo                                          | Vector                                                                      | Malicious commit                            | Status                                                                                                            |
 | --------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `the affected public repo` (public) | PR #1 "module federation fix" (merged to main)                              | `615257f` / `7f75527` (merged as `7091cbe`) | Implant on `main`; revert branch `0a0f58d` exists but is **incomplete** (left `jest.config.ts` + `.env` infected) |
-| [private org repo — name withheld]            | Force-push to `master`, spoofed employee author, backdated ~13 months     | [withheld]                                  | Implant live on `master` at time of writing                                                                       |
+| [public org repo — identifier withheld] | Pull request presented as a build-config change (merged to main)            | [withheld]                                  | Implant on `main` at time of writing; a revert branch existed but was **incomplete** (left `jest.config.ts` + `.env` infected) |
+| [private org repo — name withheld]            | Force-push to `master`, spoofed employee author, backdated ~13 months     | [withheld]                                  | Implant live on `master` at time of writing (2026-08-25); current status in the internal IR record                 |
 
 
 ---
@@ -27,13 +36,13 @@ Two GitHub repositories were compromised with an identical malicious implant, pa
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | 2026-03-02 04:38–04:40 | PolinRider's documented 132-second mass-compromise burst across public GitHub (incl. Neutralinojs org) — campaign context              |
 | 2026-03-06 / 03-08     | OpenSourceMalware (OSM) publishes initial attribution; 675+ repos / 352 owners infected                                                |
-| 2026-03-31             | Malicious PR #1 merged into `the public repo` main (commits authored "Rizwan &lt;[expectp@gmail.com](mailto:expectp@gmail.com)&gt;") |
+| 2026-03-31             | Malicious pull request merged into the public org repo's main (commits authored "Rizwan &lt;[expectp@gmail.com](mailto:expectp@gmail.com)&gt;") |
 | \~2026-04-28           | TLS cert issued for C2 `auth-confirm-eight.vercel.app` (endpoint live from ≈ this date)                                                |
 | 2026-05-30 10:55       | urlscan.io captures live C2 response (HTTP 200, 4,777-byte JS payload)                                                                 |
 | 2026-06-15             | Vercel disables the C2 deployment (HTTP 451 `DEPLOYMENT_DISABLED`)                                                                     |
 | 2026-07-13             | THOR/Nextron YARA `SUSP_OBFUSC_JS_Patterns_Jul26` flags the payload on VirusTotal (30/59 engines)                                      |
 | 2026-08-24 06:31       | Force-push of malicious commit to the private org repo's `master` (details withheld)                                                   |
-| 2026-08-24 22:12       | Incomplete revert pushed to `revert-1-module-federation-fix` on `the public repo`                                                    |
+| 2026-08-24 22:12       | Incomplete revert pushed to a revert branch on the public org repo                                                       |
 | 2026-08-25             | Incident declared; this investigation                                                                                                  |
 
 
@@ -70,8 +79,8 @@ import 'dotenv/config';
 
 - `.env` added: `AUTH_API_KEY="aHR0cHM6Ly9hdXRoLWNvbmZpcm0tZWlnaHQudmVyY2VsLmFwcC9hcGk="` → base64 → `https://auth-confirm-eight.vercel.app/api`
 - `.gitignore`: whole file rewritten with CRLF endings to bury the diff; `config.bat` and `node_modules` appended (documented attacker artifact pattern)
-- Large innocuous diffs alongside (2,900-line `package-lock.json` churn; a real-looking Java security hotfix in `ContentResource.java` in `support`)
-- Commit metadata spoofed/backdated (legit employee identity in `support`; throwaway "Rizwan" in the public repo)
+- Large innocuous diffs alongside (2,900-line `package-lock.json` churn; a real-looking Java security hotfix in a core Java source file in the private org repo)
+- Commit metadata spoofed/backdated (a real employee's identity in the private org repo; throwaway "Rizwan" in the public one)
 - `dotenv` and `node-fetch` deliberately **not** added to `package.json` — both resolve as transitive deps, keeping the manifest clean
 
 ### 3.2 The payload (what the eval executes)
@@ -131,7 +140,7 @@ A later analysis of the payload sample (conducted outside the original session; 
 Every claim in this report was verified with live queries during the investigation:
 
 1. **Repository forensics — git/GitHub API**
-  - `git clone` + `git show` on `the affected public repo` (public): implant in `frontend/jest.config.ts`, base64 C2 URL in `.env`, incomplete revert proven via `git show 0a0f58d:frontend/jest.config.ts`
+  - `git clone` + `git show` on the public org repo: implant in `frontend/jest.config.ts`, base64 C2 URL in `.env`, incomplete revert proven by reading the reverted file at the revert commit
   - Private org repo (name withheld): access obtained with a scoped classic PAT after diagnosing the 404 → 403 → missing-`repo`-scope progression; malicious commit retrieved via GitHub REST commits API when full clone timed out
 2. **Payload decoding — coreutils**: `base64 -d` of `AUTH_API_KEY` → C2 URL
 3. **Live endpoint probe — curl**: HTTP 451 + `x-vercel-error: DEPLOYMENT_DISABLED` → Vercel-side takedown confirmed
@@ -154,7 +163,7 @@ Every claim in this report was verified with live queries during the investigati
 
 ## 5. Impact Assessment
 
-- **Exposure window:** `the public repo` main infected since **2026-03-31**; `support` master since **2026-08-24**. Campaign C2s rotated over time — treat *any* execution of the implant as exposure regardless of date
+- **Exposure window:** the public org repo's main infected since **2026-03-31**; the private org repo's master since **2026-08-24**. Campaign C2s rotated over time — treat *any* execution of the implant as exposure regardless of date
 - **Who is exposed:** any developer machine or CI runner that executed `npm test` / `nx test` / Jest / TS builds loading the infected files while a campaign C2 was reachable
 - **Data at risk (if executed):** GitHub/npm/cloud credentials, SSH keys, `.env` secrets, browser sessions, crypto wallets; repos with push access (self-propagation); persistent backdoor
 - **Cross-platform:** Linux and macOS developers equally at risk — not Windows-only
@@ -179,7 +188,7 @@ Every claim in this report was verified with live queries during the investigati
 8. Report to GitHub Security / Vercel abuse (they acted on prior C2s); share IOCs with OSM campaign tracking
 
 **Secrets hygiene (from this investigation):**
-9. Rotate all credentials used during analysis (2× GitHub PATs; urlscan, MalwareBazaar, VirusTotal API keys) — they were transmitted in a support-channel chat
+9. Rotate all credentials used during the analysis itself — they were transmitted over a support channel and must be treated as exposed. Enumerated in the internal IR record, deliberately not here.
 
 ---
 
@@ -195,5 +204,5 @@ Every claim in this report was verified with live queries during the investigati
 - MITRE ATT&CK: [S1245 InvisibleFerret](https://attack.mitre.org/software/S1245/) · [G1052 Contagious Interview](https://attack.mitre.org/groups/G1052/)
 - VirusTotal file: [`a507b74b6b1e25444c586bc67ae0244cba3037f2b39f25f7eb507ded97c373c1`](https://www.virustotal.com/gui/file/a507b74b6b1e25444c586bc67ae0244cba3037f2b39f25f7eb507ded97c373c1/details)
 - urlscan.io scan: [`019e7885-c8df-711e-8712-23c5189aae89`](https://urlscan.io/result/019e7885-c8df-711e-8712-23c5189aae89/)
-- Incident artifacts: malicious commit [`the public repo@615257f`](https://github.com/the affected public repo/commit/615257f11c9d54dc41c630158aff99784b7cdb1f) (second affected repo is private; identifier withheld)
+- Incident artifacts: repository identifiers and commit SHAs for both affected repos are [withheld — internal IR record].
 

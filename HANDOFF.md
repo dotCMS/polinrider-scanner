@@ -4,6 +4,15 @@
 
 ---
 
+> **This is the public copy of this document.** Repository identifiers, commit
+> SHAs, and the credentials exposed during the investigation are deliberately
+> withheld and live only in the internal IR record. Remediation status stated
+> here is a snapshot at the document's date, not current state. Before editing:
+> do not reintroduce a private repo name, a commit SHA, or a list of exposed
+> credentials, and check with `grep` after any find-and-replace — an earlier
+> pass left a full 40-character SHA inside a link whose repo name had been
+> replaced.
+
 ## 1. Incident in one paragraph
 
 Two GitHub repositories were infected with an identical malicious JavaScript implant by the DPRK/Lazarus "PolinRider" campaign (Contagious Interview / Famous Chollima cluster). The implant hides in build/test config files, decodes a base64 C2 URL from a committed `.env`, fetches a payload from a Vercel-hosted endpoint, and `eval()`s it. The payload (hash-confirmed on VirusTotal + urlscan, 30/60 detections) is the campaign's stage-1 loader: deobfuscates itself, resolves C2 via immutable TRON/Aptos/BSC blockchain transactions, delivers **BeaverTail** infostealer → **InvisibleFerret** backdoor (MITRE S1245), and self-propagates by injecting into local project config files and force-pushing backdated commits to repos the victim can push to. **Fully cross-platform** (pure Node JS stage; per-OS persistence for macOS/Linux/Windows).
@@ -11,8 +20,8 @@ Two GitHub repositories were infected with an identical malicious JavaScript imp
 ## 2. Key artifacts & IOCs
 
 **Malicious commits:**
-- `the affected public repo` (public): commits `7f75527`, `615257f`, merged to main as `7091cbe` (2026-03-31) via PR #1. Implant in `frontend/jest.config.ts`; `.env` with C2 key. Revert branch `revert-1-module-federation-fix` = `0a0f58d` is **INCOMPLETE** (jest.config.ts + .env still infected). Main was still infected at last check.
-- A second, private org repository (internal hotfix repo; details withheld from the public copy of this document — see the internal IR record): malicious commit force-pushed to master 2026-08-24, spoofed/backdated author, implant appended to an Angular service source file, shipped alongside a plausible-looking real Java hotfix as camouflage. Still live on that branch at last check.
+- A public org repository (identifier and commit SHAs [withheld — internal IR record]): implant merged to main 2026-03-31 via a pull request presented as a build-config change. Implant in `frontend/jest.config.ts`; `.env` with C2 key. A revert branch was pushed but is **INCOMPLETE** (jest.config.ts + .env still carried the implant). **Status as of this document's date (2026-08-25) only — current remediation status is tracked in the internal IR record, not here.**
+- A second, private org repository (internal hotfix repo; details withheld from the public copy of this document — see the internal IR record): malicious commit force-pushed to master 2026-08-24, spoofed/backdated author, implant appended to an Angular service source file, shipped alongside a plausible-looking real Java hotfix as camouflage. **Status as of this document's date (2026-08-25) only — see the internal IR record for current status.**
 
 **Implant code** (identical both repos):
 ```ts
@@ -103,11 +112,11 @@ Older copy → verdicts COMPROMISED then SUSPECT across iterations; LLM-assisted
 
 ## 7. Open items / next steps
 
-1. **Purge implants**: the private hotfix repo's master is still at the malicious HEAD; `the public repo` main still infected (revert `0a0f58d` incomplete — re-apply only the legit module-federation changes cleanly). Scan full git history for signatures after purge.
+1. **Purge implants**: both affected branches carried the implant as of 2026-08-25, and the revert on the public repo was incomplete — re-apply only the legitimate changes cleanly. Scan full git history for signatures after purge. Current status is tracked in the internal IR record.
 2. **GitHub org audit logs** (not commit history — dates spoofed): force pushes, new PATs/deploy keys/OAuth apps, all repos. Campaign auto-propagates via any push access.
 3. **Fleet scan** with fixed `polinrider_scan.sh` on all Linux/macOS dev + CI machines; collect verdict exit codes.
 4. **Proxy/DNS/firewall logs** back to 2026-03-01 for IOC domains — definitive execution evidence.
-5. **Rotate**: creds used on machines that built/tested infected branches (from clean machines only); also the 2 GitHub PATs + urlscan/MalwareBazaar/VT keys shared in the original chat session.
+5. **Rotate**: creds used on machines that built/tested infected branches (from clean machines only); also the credentials used during the investigation itself, which were transmitted over a support channel and must be treated as exposed. Enumerated in the internal IR record, deliberately not here.
 6. **Notify**: repo consumers/forks; GitHub Security; Vercel abuse; share IOCs with OpenSourceMalware.
 7. Optional: obtain payload bytes via urlscan support (scan UUID in §3) or privileged VT download for first-hand static analysis.
 
