@@ -80,7 +80,23 @@ echo "$OUT" | grep -q 'SUPPRESSED.*docs-quoting' && ok "allowlisted finding stil
 echo "$OUT" | grep -q '!!!.*real-payload.js'    && ok "non-allowlisted finding still fires" || bad "allowlist over-suppressed"
 check "exit code still infected" "$RC" "1"
 
-echo "== 8. a broken engine refuses to report clean =="
+echo "== 8. rotated build number - the literals alone would miss this =="
+# Validated 2026-08-27 against the four byte-exact carriers: three DISTINCT build
+# IDs exist in that set ('9-3727-2', "A9-3727-2", "A9-3727-3"), so the campaign
+# tag is a rotating build number, not a fixed marker. The wave-1 carrier is found
+# by that number ALONE - it carries no 'Sec-V' and no AUTH_API_KEY - so one
+# rotation would have made it invisible to a literals-only rule.
+R=$(mkrepo rotated)
+{ echo "module.exports = {};"; printf '};%s' "$(pad)"; printf "global['!']='9-3727-9';var _\$_1e42=(function(l,e){\n"; } > "$R/tailwind.config.js"
+commit "$R"
+grep -qF -e '9-3727-2' -e "'Sec-V'" -e AUTH_API_KEY "$R/tailwind.config.js" \
+  && bad "fixture is wrong: a literal still matches, so this case proves nothing" \
+  || ok "no literal matches the rotated build (the case is meaningful)"
+OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
+echo "$OUT" | grep -q 'BUILD-MARKER' && ok "build marker caught the rotated number" || bad "rotated build number MISSED"
+check "exit code" "$RC" "1"
+
+echo "== 9. a broken engine refuses to report clean =="
 sed 's|^BUILD_MARKER=.*|BUILD_MARKER="WILL_NEVER_MATCH"|' "$SWEEP" > "$TMP/broken.sh"
 R=$(mkrepo forbroken); printf 'x\n' > "$R/a.js"; commit "$R"
 bash "$TMP/broken.sh" --local "$R" >/dev/null 2>&1; check "exit code" "$?" "2"
