@@ -11,7 +11,18 @@
 # command line is visible to every user on the box via ps.
 #
 # Output: one machine-readable line per repo -> RESULT <repo> <verdict> <hits>
-# Exit:   0 all clean · 1 at least one INFECTED · 2 usage/engine failure
+#         verdicts: INFECTED · NO_REF_HITS · UNKNOWN
+# Exit:   0 no ref hits anywhere · 1 at least one INFECTED · 2 usage/engine failure
+#
+# THERE IS NO "CLEAN" VERDICT, deliberately. This sweep clones with --mirror,
+# which fetches refs. An object reachable from no ref is never looked at, and
+# GitHub keeps serving such objects by SHA long after a squash orphans them --
+# four payload blobs were retrieved that way from repos this sweep had called
+# clean. So the strongest thing a green run can say is NO_REF_HITS: no ref in
+# this repo reaches the implant. It cannot say the implant is gone.
+# --deep does not close that gap either: `git rev-list --all` still walks only
+# what is reachable. Orphaned objects cannot be enumerated at all -- verifying
+# them is a per-SHA check against a catalogue, not a scan.
 #
 # ---------------------------------------------------------------------------
 # Every failure this script has had reported a poisoned repo as CLEAN, so the
@@ -80,6 +91,15 @@ trap 'rm -f "$VERDICTS"' EXIT
 note() { printf 'NOTE  %s\n' "$*" >&2; }
 skip() { printf 'SKIP  %s\n' "$*" >&2; }
 die()  { printf 'ABORT %s\n' "$*" >&2; exit 2; }
+
+# Printed on EVERY exit path that is not an abort, --local included. A caveat
+# that only prints on one code path is how a partial result gets read as total.
+coverage_note() {
+  echo "COVERAGE: refs only. Objects reachable from no ref (orphaned by a squash,"
+  echo "          still served by GitHub on request by SHA) are NOT covered by this"
+  echo "          run and cannot be enumerated. Verify those per-SHA against the"
+  echo "          incident catalogue."
+}
 
 # The scan chdirs into each mirror clone, so a relative allowlist path would stop
 # resolving there and every entry would silently stop applying. Resolve it once.
@@ -212,7 +232,9 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
   local verdict
   if [ "$hits" -gt 0 ]; then verdict=INFECTED
   elif [ "$failed" = 1 ]; then verdict=UNKNOWN
-  else verdict=CLEAN; fi
+  # NO_REF_HITS, never CLEAN: see the header. No ref reaches a signature; that
+  # is not the same claim as the repo being free of the implant.
+  else verdict=NO_REF_HITS; fi
   printf 'RESULT %s %s %s\n' "$label" "$verdict" "$hits"
   printf '%s\n' "$verdict" >> "$VERDICTS"
   [ "$verdict" = INFECTED ] && return 1
@@ -226,6 +248,7 @@ if [ -n "$LOCAL_PATH" ]; then
   [ -d "$LOCAL_PATH" ] || die "no such directory: $LOCAL_PATH"
   echo "===== local: $LOCAL_PATH ====="
   ( cd "$LOCAL_PATH" && scan_repo "$(basename "$LOCAL_PATH")" ) || true
+  coverage_note
   grep -q '^INFECTED$' "$VERDICTS" && exit 1
   grep -q '^UNKNOWN$'  "$VERDICTS" && exit 2
   exit 0
@@ -269,9 +292,10 @@ rm -f "$REPO_LIST"
 
 N_INF=$(grep -c '^INFECTED$' "$VERDICTS" || true)
 N_UNK=$(grep -c '^UNKNOWN$'  "$VERDICTS" || true)
-N_CLN=$(grep -c '^CLEAN$'    "$VERDICTS" || true)
+N_CLN=$(grep -c '^NO_REF_HITS$' "$VERDICTS" || true)
 echo
-echo "SWEEP COMPLETE: $NREPOS requested | $N_CLN clean | $N_INF infected | $N_UNK not scanned"
+echo "SWEEP COMPLETE: $NREPOS requested | $N_CLN with no ref hits | $N_INF infected | $N_UNK not scanned"
+coverage_note
 # UNKNOWN is not clean. A repo that failed to clone or whose engine errored has
 # been proven nothing, and saying so is the whole point of the exit codes.
 [ "$N_INF" -gt 0 ] && exit 1

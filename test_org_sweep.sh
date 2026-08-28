@@ -31,11 +31,18 @@ check "verdict"  "$(echo "$OUT" | grep -c 'RESULT .* INFECTED')" "1"
 check "exit code" "$RC" "1"
 echo "$OUT" | grep -q 'BUILD-MARKER' && ok "build marker fired on the no-prefix build" || bad "build marker MISSED variant A"
 
-echo "== 2. clean repo =="
-R=$(mkrepo clean)
+echo "== 2. repo with no ref hits =="
+# The verdict is NO_REF_HITS, never CLEAN. A --mirror clone fetches refs, so a
+# green run proves no ref reaches the implant -- not that the implant is gone.
+# Four payload blobs were retrieved by SHA from repos this sweep called clean.
+# Pinned here so the reassuring word cannot come back.
+R=$(mkrepo norefhits)
 printf 'export default { build: { outDir: "dist" } };\n' > "$R/vite.config.ts"
 commit "$R"
-bash "$SWEEP" --local "$R" >/dev/null 2>&1; check "exit code" "$?" "0"
+OUT=$(bash "$SWEEP" --local "$R" 2>&1); check "exit code" "$?" "0"
+check "verdict token" "$(echo "$OUT" | grep -c 'RESULT .* NO_REF_HITS')" "1"
+echo "$OUT" | grep -qE 'RESULT .* CLEAN' && bad "sweep still emits a CLEAN verdict" || ok "no CLEAN verdict emitted"
+echo "$OUT" | grep -q 'COVERAGE: refs only' && ok "summary states what the sweep does not cover" || bad "summary omits the coverage caveat"
 
 echo "== 3. minified bundle is not a whitespace-pad hit =="
 # Guards against reintroducing the rejected line-length heuristic: minification
