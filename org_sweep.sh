@@ -66,28 +66,28 @@ while [ $# -gt 0 ]; do
 done
 
 # --- indicators -------------------------------------------------------------
-# Fixed strings. Regex-escaping these is a reliable source of silent misses.
-SIGS=(
-  'rmcej%otb%'
-  'wuqktamceigynzbosdctpusocrjhrflovnxrt'
-  'helloipbot'
-  "'Sec-V'"          # quoted object key; the bare form Sec-V: matches nothing real
-  'AUTH_API_KEY'     # bare: also catches the .env carrier, which atob(process.env.* cannot
-)
-# Campaign build marker as a pattern, so it survives build-number rotation:
-#   global.i="A9-3727-2"     obfuscator.io build
-#   global['!']='9-3727-2'   older _$_ shuffle build
-BUILD_MARKER='global(\.i|\[.!.\])[[:space:]]*=[[:space:]]*["'"'"']A?[0-9]-[0-9]{4}-[0-9]'
-# Payload appended past the right edge of a diff view. Observed at 507; 200 for
-# headroom. Not a line-length rule: minification strips whitespace, so vendored
-# bundles have long lines and no long space runs.
-WSRUN=' {200,}[^ ]'
+# Defined in rules.sh, never here. They used to live in this file and in
+# polinrider_scan.sh separately, and they drifted: this script matched the
+# campaign tag as the literal 'A9-3727' long after the scanner had generalised
+# it, leaving the sweep blind to the wave-1 variant on every run it ever did.
+RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rules.sh"
+[ -r "$RULES_FILE" ] || { echo "ABORT missing rules.sh at $RULES_FILE" >&2; exit 2; }
+# shellcheck source=rules.sh
+. "$RULES_FILE"
+
+SIGS=()
+while IFS= read -r _s; do SIGS+=("$_s"); done < <(polinrider_sigs_for repo)
+[ ${#SIGS[@]} -gt 0 ] || { echo "ABORT rules.sh yielded no signatures" >&2; exit 2; }
+BUILD_MARKER="$POLINRIDER_BUILD_MARKER"
+WSRUN="$POLINRIDER_WSRUN"
+GITIGNORE_ADDED="$POLINRIDER_GITIGNORE_ADDED"
 
 # Verdicts are appended to a file, not a variable: scan_repo runs inside a
 # subshell (cd + scan), so a counter incremented there is lost on return and the
 # summary would always report zero infected.
 VERDICTS=$(mktemp "${TMPDIR:-/tmp}/polinrider_verdicts.XXXXXX")
 trap 'rm -f "$VERDICTS"' EXIT
+
 note() { printf 'NOTE  %s\n' "$*" >&2; }
 skip() { printf 'SKIP  %s\n' "$*" >&2; }
 die()  { printf 'ABORT %s\n' "$*" >&2; exit 2; }
@@ -154,7 +154,7 @@ selftest() {
   git -C "$t" grep -qlIE -e "$WSRUN" HEAD -- marker.js && { rc=1; note "self-test FAILED: whitespace rule matched a negative control"; }
   rm -rf "$t"
   [ $rc -eq 0 ] || die "engine self-test failed - refusing to report anything as clean"
-  note "engine self-test ok (git $(git --version | awk '{print $3}'))"
+  note "engine self-test ok (git $(git --version | awk '{print $3}'), rules $POLINRIDER_RULES_VERSION, ${#SIGS[@]} signatures)"
 }
 
 # --- scanning ---------------------------------------------------------------
@@ -223,7 +223,7 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
     [ -n "$o" ] && report BUILD-MARKER <<< "$o"
     o=$(grep_revs "$label wsrun" IE "$WSRUN" "${revs[@]}") || failed=1
     [ -n "$o" ] && report WHITESPACE-PAD <<< "$o"
-    o=$(grep_revs "$label gitignore" F 'config.bat' "${revs[@]}" -- '*.gitignore' '.gitignore') || failed=1
+    o=$(grep_revs "$label gitignore" F "$GITIGNORE_ADDED" "${revs[@]}" -- '*.gitignore' '.gitignore') || failed=1
     [ -n "$o" ] && report GITIGNORE-CONFIG.BAT <<< "$o"
   done
   rm -rf "$bdir" "$revfile"

@@ -25,7 +25,17 @@ hitcount() { [ -f "$FINDINGS" ] && wc -l < "$FINDINGS" | tr -d ' ' || echo 0; }
 section "1. Loader signatures (repo clones, project dirs)"
 # NOTE: third signature is the implant's exact usage (atob(process.env.AUTH_API_KEY),
 # fixed-string) - a bare 'AUTH_API_KEY' key name collides with docs/caches and FP'd.
-SIGS=('rmcej%otb%' 'wuqktamceigynzbosdctpusocrjhrflovnxrt' 'atob(process.env.AUTH_API_KEY')
+# Signatures come from rules.sh, never from this file. They used to be defined
+# here and in org_sweep.sh separately and they drifted -- the sweep kept matching
+# the campaign tag as the literal 'A9-3727' long after this script generalised
+# it, which made the sweep blind to the wave-1 variant on every run it ever did.
+RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rules.sh"
+[ -r "$RULES_FILE" ] || { echo "ERROR: missing rules.sh at $RULES_FILE" >&2; exit 2; }
+# shellcheck source=rules.sh
+. "$RULES_FILE"
+SIGS=()
+while IFS= read -r _s; do SIGS+=("$_s"); done < <(polinrider_sigs_for host)
+[ ${#SIGS[@]} -gt 0 ] || { echo "ERROR: rules.sh yielded no signatures" >&2; exit 2; }
 SCAN_DIRS=("${1:-$PWD}")
 if [ ! -d "${SCAN_DIRS[0]}" ]; then
   echo "ERROR: target directory not found: ${SCAN_DIRS[0]}" >&2
@@ -71,7 +81,7 @@ done
 
 # .env files containing base64-looking secret values
 while IFS= read -r f; do
-  grep -qE '^[A-Z_]+="[A-Za-z0-9+/=]{20,}"' "$f" 2>/dev/null && \
+  grep -qE "$POLINRIDER_ENV_B64" "$f" 2>/dev/null && \
     hit "suspicious .env with base64-looking value: $f"
 done < <(find "${SCAN_DIRS[@]}" -maxdepth 4 -name '.env' -not -path '*/node_modules/*' 2>/dev/null)
 
@@ -85,7 +95,7 @@ done < <(find "${SCAN_DIRS[@]}" -maxdepth 4 -name '.env' -not -path '*/node_modu
 # detection path missed and this was the ONLY rule that fired - S1c could not
 # change the verdict, so the scanner reported CLEAN on a real implant.
 # It is regex, so it cannot ride in SIGS (those are fixed-string -F).
-BUILD_MARKER_RE="global(\.i|\[.!.\])[[:space:]]*=[[:space:]]*[\"']A?[0-9]-[0-9]{4}-[0-9]"
+BUILD_MARKER_RE="$POLINRIDER_BUILD_MARKER"
 while IFS= read -r f; do
   [ -n "$f" ] && hit "campaign build marker (A#-####-#) in: $f"
 done < <(
@@ -108,14 +118,19 @@ section "1b. Oversized config files (>2500 bytes) - content-verified"
 #   OK        = large but ordinary config (prints as info only)
 classify_config() {  # $1 = file
   local f="$1" run big lines
-  grep -qF 'rmcej%otb%' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
-  grep -qF 'wuqktamceigynzbosdctpusocrjhrflovnxrt' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
-  grep -qF 'atob(process.env.AUTH_API_KEY' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
+  # Loop over SIGS rather than repeating the strings: this block used to carry
+  # its own hardcoded copy, which is a third place for the rules to drift to.
+  local _sig
+  for _sig in "${SIGS[@]}"; do
+    grep -qF -e "$_sig" "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
+  done
   grep -qE "$BUILD_MARKER_RE" "$f" 2>/dev/null && { echo "INFECTED-marker"; return; }
   # Whitespace padding used to push the payload past the right edge of a diff
-  # view. WHOLE FILE, not `tail -c 2000`: in the real sample the ~5,000 spaces of
-  # padding sit at the START of the payload, so the last 2000 bytes are pure
-  # payload with no spaces at all and the old tail-only test missed it.
+  # view. WHOLE FILE, not `tail -c 2000`: the padding sits at the START of the
+  # payload, so the last 2000 bytes are pure payload with no spaces at all and
+  # the old tail-only test missed it. (Measured 2026-08-27 on all three
+  # obfuscated carriers: the run is exactly 507 spaces, not the ~5,000 this
+  # comment used to claim. The conclusion held; the number did not.)
   if awk '{ if (match($0,/[[:space:]]{200,}/)) found=1 } END{ exit !found }' "$f" 2>/dev/null; then
     echo "SUSPICIOUS-pad"; return
   fi
@@ -178,7 +193,7 @@ section "1b2. Fake font payload files (no valid font header)"
 # icon-font kits sometimes ship raw sfnt data renamed to .woff without actually
 # WOFF-wrapping it - that's sloppy packaging, not a sign of compromise.
 # Hex (not raw bytes) avoids `$(...)` mangling NUL-prefixed magics like TrueType's.
-FONT_MAGICS_HEX='774f4632 774f4646 00010000 4f54544f 74727565 74797031'
+FONT_MAGICS_HEX="$POLINRIDER_FONT_MAGICS_HEX"
 check_fake_font() {  # $1 = file
   local f="$1" magic sz m
   sz=$(wc -c < "$f" 2>/dev/null | tr -dc '0-9'); sz=${sz:-0}
@@ -215,9 +230,12 @@ is_scan_scope() {  # keep repo checkouts, drop caches/extensions/app-support
 # NOTE on 'Sec-V': the bytes in the payload are the QUOTED object key 'Sec-V':
 # so the quote is part of the indicator. The pattern here used to be Sec-V:
 # without it, which matches zero real payloads.
+# Informational only. These are hard indicators in a REPO scan but not here:
+# on a workstation they appear as quoted text in Claude Code transcripts and in
+# tool caches. rules.sh records that split and the reason for it.
 REGEX_PATS=(
   'helloipbot'
-  'publicnode\.com|bsc-dataseed|1rpc\.io|drpc\.org|blockscout'
+  "$POLINRIDER_RPC_HOSTS"
   "'Sec-V'"
 )
 # The alternation is built from the array. It used to be spelled out as
@@ -260,7 +278,7 @@ fi
 echo "$candidates" | while IFS= read -r f; do
   [ -n "$f" ] || continue
   is_scan_scope "$f" || continue
-  grep -qE 'while *\( *!!\[\] *\)' "$f" 2>/dev/null && \
+  grep -qE "$POLINRIDER_OBFUSCATOR_CONFIRM" "$f" 2>/dev/null && \
     echo -e "${YEL}[i] obfuscator.io-like shape (minified JS also matches; verify): $f${NC}"
 done | head -20
 
