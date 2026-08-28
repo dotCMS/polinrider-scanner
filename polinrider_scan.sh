@@ -36,6 +36,12 @@ RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rules.sh"
 SIGS=()
 while IFS= read -r _s; do SIGS+=("$_s"); done < <(polinrider_sigs_for host)
 [ ${#SIGS[@]} -gt 0 ] || { echo "ERROR: rules.sh yielded no signatures" >&2; exit 2; }
+# rules.sh sources canaries.sh. A sourced file that `return`s does NOT abort its
+# caller, so the failure has to be caught here or the canary silently evaporates
+# and the scan runs unverified.
+[ -n "${POLINRIDER_CANARY_CORE:-}" ] || {
+  echo "ERROR: canary samples did not load (canaries.sh missing or unreadable)" >&2
+  echo "       Refusing to scan: the rules cannot be proven to match anything." >&2; exit 2; }
 SCAN_DIRS=("${1:-$PWD}")
 if [ ! -d "${SCAN_DIRS[0]}" ]; then
   echo "ERROR: target directory not found: ${SCAN_DIRS[0]}" >&2
@@ -48,6 +54,98 @@ if command -v rg >/dev/null 2>&1; then
   GREP_ENGINE="rg"
   info "using ripgrep: $(rg --version | head -1)"
 fi
+
+# --- engine self-test (canary) -----------------------------------------------
+# org_sweep.sh has had this since the rg-without-fallback failure; the host
+# scanner never did, and it is the half that runs on developer machines, where
+# the environment is least predictable. Same failure shape: `rg` is often only a
+# shell function (Claude Code ships one), so `command -v rg` succeeds in an
+# interactive zsh and the binary is absent inside this bash. The command then
+# fails, output comes back empty, and empty reads as "nothing found".
+#
+# The fixtures are POLINRIDER_CANARY_* from rules.sh: fragments of the real
+# carriers, kept deliberately apart from the signature sets. A canary generated
+# from ${SIGS[@]} would only prove the rules match themselves and would pass
+# with every signature silently rewritten. These are the bytes the implant
+# actually ships, so a rule that stops matching real malware kills the scanner
+# instead of reporting a clean host.
+#
+# Exercised through the same shapes the real scan uses, because those are what
+# broke before:
+#   * every signature in ONE rg invocation via -e (a bare second pattern is
+#     silently treated as a PATH, killing multi-signature scans)
+#   * the -g '!dir' bare-suffix exclude form ('!dir/**' only matches top level)
+#   * the include glob, so a hit has to survive the extension filter
+#   * BUILD_MARKER as a regex, which cannot ride in the fixed-string set
+selftest() {
+  local t rc=0
+  t=$(mktemp -d) || { echo "ERROR: self-test could not create a tempdir" >&2; exit 2; }
+  mkdir -p "$t/node_modules"
+
+  printf '%s\n' "$POLINRIDER_CANARY_CORE"     > "$t/core_a.js"
+  printf '%s\n' "$POLINRIDER_CANARY_HOST"     > "$t/carrier_c.js"
+  printf '%s\n' "$POLINRIDER_CANARY_MARKER_A" > "$t/marker_a.js"
+  printf '%s\n' "$POLINRIDER_CANARY_MARKER_B" > "$t/marker_b.js"
+  printf '%s\n' "$POLINRIDER_CANARY_NEGATIVE" > "$t/negative.js"
+  # a real hit that must stay excluded by the directory filter
+  printf '%s\n' "$POLINRIDER_CANARY_CORE"     > "$t/node_modules/excluded.js"
+
+  local found=""
+  if [ "$GREP_ENGINE" = "rg" ]; then
+    local _pa=(); for _s in "${SIGS[@]}"; do _pa+=(-e "$_s"); done
+    found=$(rg -l -i -F --no-messages --hidden -g '!node_modules' -g '!.git' \
+               -g '!*.min.js' -g '*.{js,mjs,cjs,ts,json}' "${_pa[@]}" "$t" 2>/dev/null)
+  else
+    # one pass per signature, exactly as the real grep branch below does it
+    for _s in "${SIGS[@]}"; do
+      found="$found
+$(grep -rIlF --exclude-dir=node_modules --exclude-dir=.git \
+       --include='*.js' --include='*.mjs' --include='*.cjs' \
+       --include='*.ts' --include='*.json' "$_s" "$t" 2>/dev/null)"
+    done
+  fi
+
+  case "$found" in
+    *core_a.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: no signature matched the wave-1 core string" >&2 ;;
+  esac
+  case "$found" in
+    *carrier_c.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: no signature matched the variant C host usage" >&2 ;;
+  esac
+  case "$found" in
+    *negative.js*) rc=1; echo "SELF-TEST FAILED: signatures matched a clean control file" >&2 ;;
+  esac
+  case "$found" in
+    *node_modules*) rc=1; echo "SELF-TEST FAILED: the node_modules exclude did not apply" >&2 ;;
+  esac
+
+  local m
+  if [ "$GREP_ENGINE" = "rg" ]; then
+    m=$(rg -l --no-messages --hidden -g '*.{js,mjs,cjs,ts,mts}' \
+           -e "$POLINRIDER_BUILD_MARKER" "$t" 2>/dev/null)
+  else
+    m=$(grep -rIlE --include='*.js' --include='*.mjs' --include='*.cjs' \
+             --include='*.ts' "$POLINRIDER_BUILD_MARKER" "$t" 2>/dev/null)
+  fi
+  case "$m" in
+    *marker_a.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: build marker missed the wave-1 spelling" >&2 ;;
+  esac
+  case "$m" in
+    *marker_b.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: build marker missed the obfuscator.io spelling" >&2 ;;
+  esac
+
+  rm -rf "$t"
+  if [ $rc -ne 0 ]; then
+    echo "ERROR: engine self-test failed with $GREP_ENGINE - refusing to scan." >&2
+    echo "       A scan that cannot find a planted implant cannot report a clean host." >&2
+    exit 2
+  fi
+  info "engine self-test ok ($GREP_ENGINE, rules $POLINRIDER_RULES_VERSION, ${#SIGS[@]} signatures)"
+}
+selftest
 
 for d in "${SCAN_DIRS[@]}"; do
   info "scanning $d (this can take a while)..."

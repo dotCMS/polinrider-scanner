@@ -78,6 +78,12 @@ RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rules.sh"
 SIGS=()
 while IFS= read -r _s; do SIGS+=("$_s"); done < <(polinrider_sigs_for repo)
 [ ${#SIGS[@]} -gt 0 ] || { echo "ABORT rules.sh yielded no signatures" >&2; exit 2; }
+# rules.sh sources canaries.sh. A sourced file that `return`s does NOT abort its
+# caller, so the failure has to be caught here or the canary silently evaporates
+# and the sweep runs unverified.
+[ -n "${POLINRIDER_CANARY_CORE:-}" ] || {
+  echo "ABORT canary samples did not load (canaries.sh missing or unreadable)" >&2
+  echo "      Refusing to sweep: the rules cannot be proven to match anything." >&2; exit 2; }
 BUILD_MARKER="$POLINRIDER_BUILD_MARKER"
 WSRUN="$POLINRIDER_WSRUN"
 GITIGNORE_ADDED="$POLINRIDER_GITIGNORE_ADDED"
@@ -142,14 +148,28 @@ selftest() {
   local t; t=$(mktemp -d); local rc=0
   git -C "$t" init -q 2>/dev/null || die "self-test: git init failed"
   printf 'x%sy\n' "$(printf '%*s' 250 '')" > "$t/pad.js"
-  printf "global['!']='9-3727-2';\n" > "$t/marker.js"
+  # sigs.js is built FROM the rule set on purpose: it proves the engine can match
+  # every literal, including the ones with quotes and $ in them. It says nothing
+  # about whether the rules still match malware -- it would pass with every
+  # signature rewritten. The POLINRIDER_CANARY_* samples below are what covers
+  # that: real carrier bytes, kept apart from the rules, so a drifted rule dies
+  # here instead of reporting a poisoned repo as having no ref hits.
   { for s in "${SIGS[@]}"; do printf '%s\n' "$s"; done; } > "$t/sigs.js"
+  printf '%s\n' "$POLINRIDER_CANARY_CORE"     > "$t/carrier_core.js"
+  printf '%s\n' "$POLINRIDER_CANARY_REPO"     > "$t/carrier_repo.js"
+  printf '%s\n' "$POLINRIDER_CANARY_MARKER_A" > "$t/marker.js"
+  printf '%s\n' "$POLINRIDER_CANARY_MARKER_B" > "$t/marker_b.js"
+  printf '%s\n' "$POLINRIDER_CANARY_NEGATIVE" > "$t/negative.js"
   git -C "$t" add -A -f >/dev/null 2>&1
   git -C "$t" -c user.email=t@t -c user.name=t commit -qm t >/dev/null 2>&1 || die "self-test: commit failed"
   for s in "${SIGS[@]}"; do
     git -C "$t" grep -qlF -e "$s" HEAD -- sigs.js || { rc=1; note "self-test FAILED for literal: $s"; }
   done
-  git -C "$t" grep -qlE -e "$BUILD_MARKER" HEAD -- marker.js || { rc=1; note "self-test FAILED for build marker"; }
+  git -C "$t" grep -qlF -e "$POLINRIDER_CANARY_CORE" HEAD -- carrier_core.js || { rc=1; note "self-test FAILED: no signature matched the wave-1 carrier"; }
+  git -C "$t" grep -qlF -e "'Sec-V'" HEAD -- carrier_repo.js || { rc=1; note "self-test FAILED: no signature matched the variant B header key"; }
+  git -C "$t" grep -qlF "${SIGS[@]/#/-e}" HEAD -- negative.js && { rc=1; note "self-test FAILED: a signature matched the clean control"; }
+  git -C "$t" grep -qlE -e "$BUILD_MARKER" HEAD -- marker.js || { rc=1; note "self-test FAILED: build marker missed the wave-1 spelling"; }
+  git -C "$t" grep -qlE -e "$BUILD_MARKER" HEAD -- marker_b.js || { rc=1; note "self-test FAILED: build marker missed the obfuscator.io spelling"; }
   git -C "$t" grep -qlIE -e "$WSRUN" HEAD -- pad.js || { rc=1; note "self-test FAILED for whitespace run"; }
   git -C "$t" grep -qlIE -e "$WSRUN" HEAD -- marker.js && { rc=1; note "self-test FAILED: whitespace rule matched a negative control"; }
   rm -rf "$t"

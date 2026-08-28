@@ -147,3 +147,17 @@ polinrider_sigs_for() {   # $1 = repo | host
     *) echo "polinrider_sigs_for: need 'repo' or 'host', got '${1:-}'" >&2; return 2 ;;
   esac
 }
+
+# --- canary samples --------------------------------------------------------
+# Known-positive carrier bytes live in their OWN file, sourced here so consumers
+# still have one thing to source. The separation is not tidiness: a canary that
+# shares a file with the rules it validates is not independent of them. The
+# first version of this lived below, and a single find-and-replace across this
+# file rewrote the rule and its own evidence in one pass -- the self-test went
+# on passing with a signature that no longer matched any real carrier. Keeping
+# the samples out of reach of an edit to this file is the entire mechanism.
+POLINRIDER_CANARIES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/canaries.sh"
+[ -r "$POLINRIDER_CANARIES_FILE" ] || {
+  echo "ERROR: missing canaries.sh at $POLINRIDER_CANARIES_FILE" >&2; return 2 2>/dev/null || exit 2; }
+# shellcheck source=canaries.sh
+. "$POLINRIDER_CANARIES_FILE"
