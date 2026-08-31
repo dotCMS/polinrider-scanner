@@ -165,8 +165,13 @@ selftest() {
   for s in "${SIGS[@]}"; do
     git -C "$t" grep -qlF -e "$s" HEAD -- sigs.js || { rc=1; note "self-test FAILED for literal: $s"; }
   done
-  git -C "$t" grep -qlF -e "$POLINRIDER_CANARY_CORE" HEAD -- carrier_core.js || { rc=1; note "self-test FAILED: no signature matched the wave-1 carrier"; }
-  git -C "$t" grep -qlF -e "'Sec-V'" HEAD -- carrier_repo.js || { rc=1; note "self-test FAILED: no signature matched the variant B header key"; }
+  # Run the RULE SET against the carriers, never the sample against itself.
+  # The first version of these two lines searched each carrier for the very
+  # string it had just been written from, which proves git grep works and
+  # nothing else -- it passed with the core signature rewritten to garbage,
+  # caught only when the PR-check prototype exercised the whole path.
+  git -C "$t" grep -qlF "${SIGS[@]/#/-e}" HEAD -- carrier_core.js || { rc=1; note "self-test FAILED: no signature matched the wave-1 carrier"; }
+  git -C "$t" grep -qlF "${SIGS[@]/#/-e}" HEAD -- carrier_repo.js || { rc=1; note "self-test FAILED: no signature matched the variant B header key"; }
   git -C "$t" grep -qlF "${SIGS[@]/#/-e}" HEAD -- negative.js && { rc=1; note "self-test FAILED: a signature matched the clean control"; }
   git -C "$t" grep -qlE -e "$BUILD_MARKER" HEAD -- marker.js || { rc=1; note "self-test FAILED: build marker missed the wave-1 spelling"; }
   git -C "$t" grep -qlE -e "$BUILD_MARKER" HEAD -- marker_b.js || { rc=1; note "self-test FAILED: build marker missed the obfuscator.io spelling"; }

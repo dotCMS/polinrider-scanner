@@ -103,6 +103,23 @@ OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
 echo "$OUT" | grep -q 'BUILD-MARKER' && ok "build marker caught the rotated number" || bad "rotated build number MISSED"
 check "exit code" "$RC" "1"
 
+echo "== 9b. a DRIFTED RULE refuses to report anything =="
+# Distinct from a broken engine. Here git works perfectly; the rule simply no
+# longer matches real malware. The self-test used to pass this, because it
+# searched each carrier sample for the string it had been written from -- a
+# tautology that survives any rewrite of the rules. canaries.sh is copied in
+# untouched on purpose: the sabotage edits the rule, and the evidence it is
+# checked against must not move with it.
+D=$(mktemp -d)
+cp "$(dirname "$0")/org_sweep.sh" "$(dirname "$0")/canaries.sh" "$D/"
+sed 's/rmcej%otb%/BROKEN_XX/' "$(dirname "$0")/rules.sh" > "$D/rules.sh"
+R=$(mkrepo drift); printf 'clean\n' > "$R/a.js"; commit "$R"
+OUT=$(bash "$D/org_sweep.sh" --local "$R" 2>&1); RC=$?
+check "exit code" "$RC" "2"
+echo "$OUT" | grep -q 'self-test FAILED' && ok "drifted rule killed the self-test" || bad "a rule that matches no real carrier still ran"
+echo "$OUT" | grep -qE 'RESULT .* (NO_REF_HITS|CLEAN)' && bad "reported a verdict despite drifted rules" || ok "no verdict emitted"
+rm -rf "$D"
+
 echo "== 9. a broken engine refuses to report clean =="
 sed 's|^BUILD_MARKER=.*|BUILD_MARKER="WILL_NEVER_MATCH"|' "$SWEEP" > "$TMP/broken.sh"
 R=$(mkrepo forbroken); printf 'x\n' > "$R/a.js"; commit "$R"
