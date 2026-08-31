@@ -25,7 +25,23 @@ hitcount() { [ -f "$FINDINGS" ] && wc -l < "$FINDINGS" | tr -d ' ' || echo 0; }
 section "1. Loader signatures (repo clones, project dirs)"
 # NOTE: third signature is the implant's exact usage (atob(process.env.AUTH_API_KEY),
 # fixed-string) - a bare 'AUTH_API_KEY' key name collides with docs/caches and FP'd.
-SIGS=('rmcej%otb%' 'wuqktamceigynzbosdctpusocrjhrflovnxrt' 'atob(process.env.AUTH_API_KEY')
+# Signatures come from rules.sh, never from this file. They used to be defined
+# here and in org_sweep.sh separately and they drifted -- the sweep kept matching
+# the campaign tag as the literal 'A9-3727' long after this script generalised
+# it, which made the sweep blind to the wave-1 variant on every run it ever did.
+RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rules.sh"
+[ -r "$RULES_FILE" ] || { echo "ERROR: missing rules.sh at $RULES_FILE" >&2; exit 2; }
+# shellcheck source=rules.sh
+. "$RULES_FILE"
+SIGS=()
+while IFS= read -r _s; do SIGS+=("$_s"); done < <(polinrider_sigs_for host)
+[ ${#SIGS[@]} -gt 0 ] || { echo "ERROR: rules.sh yielded no signatures" >&2; exit 2; }
+# rules.sh sources canaries.sh. A sourced file that `return`s does NOT abort its
+# caller, so the failure has to be caught here or the canary silently evaporates
+# and the scan runs unverified.
+[ -n "${POLINRIDER_CANARY_CORE:-}" ] || {
+  echo "ERROR: canary samples did not load (canaries.sh missing or unreadable)" >&2
+  echo "       Refusing to scan: the rules cannot be proven to match anything." >&2; exit 2; }
 SCAN_DIRS=("${1:-$PWD}")
 if [ ! -d "${SCAN_DIRS[0]}" ]; then
   echo "ERROR: target directory not found: ${SCAN_DIRS[0]}" >&2
@@ -38,6 +54,98 @@ if command -v rg >/dev/null 2>&1; then
   GREP_ENGINE="rg"
   info "using ripgrep: $(rg --version | head -1)"
 fi
+
+# --- engine self-test (canary) -----------------------------------------------
+# org_sweep.sh has had this since the rg-without-fallback failure; the host
+# scanner never did, and it is the half that runs on developer machines, where
+# the environment is least predictable. Same failure shape: `rg` is often only a
+# shell function (Claude Code ships one), so `command -v rg` succeeds in an
+# interactive zsh and the binary is absent inside this bash. The command then
+# fails, output comes back empty, and empty reads as "nothing found".
+#
+# The fixtures are POLINRIDER_CANARY_* from rules.sh: fragments of the real
+# carriers, kept deliberately apart from the signature sets. A canary generated
+# from ${SIGS[@]} would only prove the rules match themselves and would pass
+# with every signature silently rewritten. These are the bytes the implant
+# actually ships, so a rule that stops matching real malware kills the scanner
+# instead of reporting a clean host.
+#
+# Exercised through the same shapes the real scan uses, because those are what
+# broke before:
+#   * every signature in ONE rg invocation via -e (a bare second pattern is
+#     silently treated as a PATH, killing multi-signature scans)
+#   * the -g '!dir' bare-suffix exclude form ('!dir/**' only matches top level)
+#   * the include glob, so a hit has to survive the extension filter
+#   * BUILD_MARKER as a regex, which cannot ride in the fixed-string set
+selftest() {
+  local t rc=0
+  t=$(mktemp -d) || { echo "ERROR: self-test could not create a tempdir" >&2; exit 2; }
+  mkdir -p "$t/node_modules"
+
+  printf '%s\n' "$POLINRIDER_CANARY_CORE"     > "$t/core_a.js"
+  printf '%s\n' "$POLINRIDER_CANARY_HOST"     > "$t/carrier_c.js"
+  printf '%s\n' "$POLINRIDER_CANARY_MARKER_A" > "$t/marker_a.js"
+  printf '%s\n' "$POLINRIDER_CANARY_MARKER_B" > "$t/marker_b.js"
+  printf '%s\n' "$POLINRIDER_CANARY_NEGATIVE" > "$t/negative.js"
+  # a real hit that must stay excluded by the directory filter
+  printf '%s\n' "$POLINRIDER_CANARY_CORE"     > "$t/node_modules/excluded.js"
+
+  local found=""
+  if [ "$GREP_ENGINE" = "rg" ]; then
+    local _pa=(); for _s in "${SIGS[@]}"; do _pa+=(-e "$_s"); done
+    found=$(rg -l -i -F --no-messages --hidden -g '!node_modules' -g '!.git' \
+               -g '!*.min.js' -g '*.{js,mjs,cjs,ts,json}' "${_pa[@]}" "$t" 2>/dev/null)
+  else
+    # one pass per signature, exactly as the real grep branch below does it
+    for _s in "${SIGS[@]}"; do
+      found="$found
+$(grep -rIlF --exclude-dir=node_modules --exclude-dir=.git \
+       --include='*.js' --include='*.mjs' --include='*.cjs' \
+       --include='*.ts' --include='*.json' "$_s" "$t" 2>/dev/null)"
+    done
+  fi
+
+  case "$found" in
+    *core_a.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: no signature matched the wave-1 core string" >&2 ;;
+  esac
+  case "$found" in
+    *carrier_c.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: no signature matched the variant C host usage" >&2 ;;
+  esac
+  case "$found" in
+    *negative.js*) rc=1; echo "SELF-TEST FAILED: signatures matched a clean control file" >&2 ;;
+  esac
+  case "$found" in
+    *node_modules*) rc=1; echo "SELF-TEST FAILED: the node_modules exclude did not apply" >&2 ;;
+  esac
+
+  local m
+  if [ "$GREP_ENGINE" = "rg" ]; then
+    m=$(rg -l --no-messages --hidden -g '*.{js,mjs,cjs,ts,mts}' \
+           -e "$POLINRIDER_BUILD_MARKER" "$t" 2>/dev/null)
+  else
+    m=$(grep -rIlE --include='*.js' --include='*.mjs' --include='*.cjs' \
+             --include='*.ts' "$POLINRIDER_BUILD_MARKER" "$t" 2>/dev/null)
+  fi
+  case "$m" in
+    *marker_a.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: build marker missed the wave-1 spelling" >&2 ;;
+  esac
+  case "$m" in
+    *marker_b.js*) ;;
+    *) rc=1; echo "SELF-TEST FAILED: build marker missed the obfuscator.io spelling" >&2 ;;
+  esac
+
+  rm -rf "$t"
+  if [ $rc -ne 0 ]; then
+    echo "ERROR: engine self-test failed with $GREP_ENGINE - refusing to scan." >&2
+    echo "       A scan that cannot find a planted implant cannot report a clean host." >&2
+    exit 2
+  fi
+  info "engine self-test ok ($GREP_ENGINE, rules $POLINRIDER_RULES_VERSION, ${#SIGS[@]} signatures)"
+}
+selftest
 
 for d in "${SCAN_DIRS[@]}"; do
   info "scanning $d (this can take a while)..."
@@ -71,7 +179,7 @@ done
 
 # .env files containing base64-looking secret values
 while IFS= read -r f; do
-  grep -qE '^[A-Z_]+="[A-Za-z0-9+/=]{20,}"' "$f" 2>/dev/null && \
+  grep -qE "$POLINRIDER_ENV_B64" "$f" 2>/dev/null && \
     hit "suspicious .env with base64-looking value: $f"
 done < <(find "${SCAN_DIRS[@]}" -maxdepth 4 -name '.env' -not -path '*/node_modules/*' 2>/dev/null)
 
@@ -85,7 +193,7 @@ done < <(find "${SCAN_DIRS[@]}" -maxdepth 4 -name '.env' -not -path '*/node_modu
 # detection path missed and this was the ONLY rule that fired - S1c could not
 # change the verdict, so the scanner reported CLEAN on a real implant.
 # It is regex, so it cannot ride in SIGS (those are fixed-string -F).
-BUILD_MARKER_RE="global(\.i|\[.!.\])[[:space:]]*=[[:space:]]*[\"']A?[0-9]-[0-9]{4}-[0-9]"
+BUILD_MARKER_RE="$POLINRIDER_BUILD_MARKER"
 while IFS= read -r f; do
   [ -n "$f" ] && hit "campaign build marker (A#-####-#) in: $f"
 done < <(
@@ -108,14 +216,19 @@ section "1b. Oversized config files (>2500 bytes) - content-verified"
 #   OK        = large but ordinary config (prints as info only)
 classify_config() {  # $1 = file
   local f="$1" run big lines
-  grep -qF 'rmcej%otb%' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
-  grep -qF 'wuqktamceigynzbosdctpusocrjhrflovnxrt' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
-  grep -qF 'atob(process.env.AUTH_API_KEY' "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
+  # Loop over SIGS rather than repeating the strings: this block used to carry
+  # its own hardcoded copy, which is a third place for the rules to drift to.
+  local _sig
+  for _sig in "${SIGS[@]}"; do
+    grep -qF -e "$_sig" "$f" 2>/dev/null && { echo "INFECTED-sig"; return; }
+  done
   grep -qE "$BUILD_MARKER_RE" "$f" 2>/dev/null && { echo "INFECTED-marker"; return; }
   # Whitespace padding used to push the payload past the right edge of a diff
-  # view. WHOLE FILE, not `tail -c 2000`: in the real sample the ~5,000 spaces of
-  # padding sit at the START of the payload, so the last 2000 bytes are pure
-  # payload with no spaces at all and the old tail-only test missed it.
+  # view. WHOLE FILE, not `tail -c 2000`: the padding sits at the START of the
+  # payload, so the last 2000 bytes are pure payload with no spaces at all and
+  # the old tail-only test missed it. (Measured 2026-08-27 on all three
+  # obfuscated carriers: the run is exactly 507 spaces, not the ~5,000 this
+  # comment used to claim. The conclusion held; the number did not.)
   if awk '{ if (match($0,/[[:space:]]{200,}/)) found=1 } END{ exit !found }' "$f" 2>/dev/null; then
     echo "SUSPICIOUS-pad"; return
   fi
@@ -178,7 +291,7 @@ section "1b2. Fake font payload files (no valid font header)"
 # icon-font kits sometimes ship raw sfnt data renamed to .woff without actually
 # WOFF-wrapping it - that's sloppy packaging, not a sign of compromise.
 # Hex (not raw bytes) avoids `$(...)` mangling NUL-prefixed magics like TrueType's.
-FONT_MAGICS_HEX='774f4632 774f4646 00010000 4f54544f 74727565 74797031'
+FONT_MAGICS_HEX="$POLINRIDER_FONT_MAGICS_HEX"
 check_fake_font() {  # $1 = file
   local f="$1" magic sz m
   sz=$(wc -c < "$f" 2>/dev/null | tr -dc '0-9'); sz=${sz:-0}
@@ -212,25 +325,41 @@ is_scan_scope() {  # keep repo checkouts, drop caches/extensions/app-support
 # NOTE: the A#-####-# build marker used to live here. It is now a HARD IOC in
 # section 1 + classify_config (see the evidence in the S1 comment); keeping it
 # here as well would only double-report it as an unactionable [i] line.
+# NOTE on 'Sec-V': the bytes in the payload are the QUOTED object key 'Sec-V':
+# so the quote is part of the indicator. The pattern here used to be Sec-V:
+# without it, which matches zero real payloads.
+# Informational only. These are hard indicators in a REPO scan but not here:
+# on a workstation they appear as quoted text in Claude Code transcripts and in
+# tool caches. rules.sh records that split and the reason for it.
 REGEX_PATS=(
   'helloipbot'
-  'publicnode\.com|bsc-dataseed|1rpc\.io|drpc\.org|blockscout'
-  'Sec-V:'
+  "$POLINRIDER_RPC_HOSTS"
+  "'Sec-V'"
 )
+# The alternation is built from the array. It used to be spelled out as
+# ${REGEX_PATS[0]}|...|${REGEX_PATS[3]} against a 3-element array: under `set -u`
+# that is an unbound variable, the subshell died before grep ran, and section 1c
+# reported nothing on every host without a ripgrep BINARY (rg is frequently only
+# a shell function, so `command -v rg` succeeds in zsh and fails in this script).
+# A silent empty result here is indistinguishable from a clean host.
+REGEX_ALT=$(IFS='|'; printf '%s' "${REGEX_PATS[*]}")
 while IFS= read -r f; do
   is_scan_scope "$f" || continue
   echo -e "${YEL}[i] loader-family pattern (verify against hard IOCs): $f${NC}"
 done < <(
   for d in "${SCAN_DIRS[@]}"; do
     patargs=(); for p in "${REGEX_PATS[@]}"; do patargs+=(-e "$p"); done
+    # stderr is kept: an engine that fails here must not read as "no findings".
     if [ "$GREP_ENGINE" = "rg" ]; then
       rg -l --no-messages --hidden -g '!node_modules' -g '!.git' \
-         -g '*.{js,mjs,cjs,ts,mts}' "${patargs[@]}" "$d" 2>/dev/null
+         -g '*.{js,mjs,cjs,ts,mts}' "${patargs[@]}" "$d"
     else
       grep -rIlE --exclude-dir=node_modules --exclude-dir=.git \
         --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' \
-        "${REGEX_PATS[0]}|${REGEX_PATS[1]}|${REGEX_PATS[2]}|${REGEX_PATS[3]}" "$d" 2>/dev/null
+        "$REGEX_ALT" "$d"
     fi
+    rc=$?
+    [ $rc -gt 1 ] && echo "ENGINE ERROR in section 1c (rc=$rc) - not a clean result" >&2
   done | sort -u
 )
 # obfuscator.io shape: _0x hex array AND while(!![]) co-occurring in a PROJECT file.
@@ -247,7 +376,7 @@ fi
 echo "$candidates" | while IFS= read -r f; do
   [ -n "$f" ] || continue
   is_scan_scope "$f" || continue
-  grep -qE 'while *\( *!!\[\] *\)' "$f" 2>/dev/null && \
+  grep -qE "$POLINRIDER_OBFUSCATOR_CONFIRM" "$f" 2>/dev/null && \
     echo -e "${YEL}[i] obfuscator.io-like shape (minified JS also matches; verify): $f${NC}"
 done | head -20
 

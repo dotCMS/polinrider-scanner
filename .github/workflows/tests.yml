@@ -1,0 +1,90 @@
+name: Tests
+
+# This repository had no CI at all. Its fixture suites only ran when someone
+# remembered to, in a repo whose own history includes a suite that had no
+# assertions and passed for weeks while testing nothing (see f5bc89e).
+#
+# Every defect these suites guard against fails in the same direction: reporting
+# an infected file or repository as CLEAN. A silent regression here does not
+# break a build -- it quietly stops finding malware. So they run on every change.
+#
+# Suites are DISCOVERED, not listed: test_*.sh at the repo root. Listing them
+# would mean a new suite is silently not run until someone edits this file, and
+# a workflow that names a suite not yet on the base branch fails for the wrong
+# reason.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suites:
+    name: Fixture suites (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both engines matter. The scanner falls back to grep where no ripgrep
+        # BINARY exists -- `rg` is frequently only a shell function, so
+        # `command -v rg` can succeed in an interactive zsh and fail inside the
+        # script. That difference has hidden a real detection failure before.
+        engine: [grep, ripgrep]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install ripgrep
+        if: matrix.engine == 'ripgrep'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
+      - name: Engine in use
+        run: |
+          command -v rg >/dev/null && rg --version | head -1 || echo "ripgrep: absent (grep fallback path)"
+          git --version
+          bash --version | head -1
+
+      - name: Run every test_*.sh
+        run: |
+          shopt -s nullglob
+          suites=(test_*.sh)
+          if [ ${#suites[@]} -eq 0 ]; then
+            echo "::error::no test_*.sh found - this job would pass by finding nothing"
+            exit 1
+          fi
+          echo "discovered ${#suites[@]} suite(s): ${suites[*]}"
+          # POLINRIDER_DNS_TIMEOUT bounds the scanner's unified-log pass, which is
+          # a no-op on Linux but must not be able to stall the runner.
+          rc=0
+          for s in "${suites[@]}"; do
+            echo "::group::$s"
+            if POLINRIDER_DNS_TIMEOUT=1 bash "$s"; then
+              echo "PASS  $s"
+            else
+              echo "::error file=$s::$s failed"
+              rc=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $rc
+
+  syntax:
+    name: Shell syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: bash -n
+        # Syntax only. These scripts are bash-specific and macOS bash-3.2
+        # compatible on purpose, so a style linter would fight the code.
+        run: |
+          shopt -s nullglob
+          rc=0
+          for f in *.sh; do
+            bash -n "$f" || { echo "::error file=$f::syntax error"; rc=1; }
+          done
+          exit $rc

@@ -25,6 +25,17 @@ printf 'rmcejXXotbXX close but wrong\n'                 > "$FIX/nearmiss.ts"
 # caches and caused false positives. It must stay unmatched.
 printf 'AUTH_API_KEY="aGVsbG8="  # just the key name, from docs\n' > "$FIX/docs.js"
 
+# --- section 1c fixtures ------------------------------------------------------
+# 1c is informational, but it used to be silently DEAD on any host without a
+# ripgrep binary: the grep branch spelled the alternation as
+# ${REGEX_PATS[0]}|...|${REGEX_PATS[3]} against a 3-element array, so under
+# `set -u` the subshell died before grep ran and the section printed nothing.
+printf "var h = {'Sec-V':'1'};\n"                        > "$FIX/secv.js"
+printf "const u='https://bsc-dataseed.binance.org/';\n"  > "$FIX/rpc.js"
+# Negative control for the quoting fix: the bytes in the payload are the QUOTED
+# key 'Sec-V':, so an unquoted Sec-V: is not the indicator and must not match.
+printf 'header Sec-V: 1 unquoted, not the indicator\n'   > "$FIX/secv_unquoted.js"
+
 # Must be skipped: node_modules / .git
 printf 'rmcej%%otb%% in node_modules\n'                 > "$FIX/node_modules/dep.js"
 printf 'rmcej%%otb%% in gitdir\n'                       > "$FIX/.git/config.json"
@@ -84,6 +95,43 @@ chknot "bare AUTH_API_KEY key name wrongly matched"   'signature .* in: .*docs\.
 chknot "node_modules was scanned"                     'in: .*node_modules'
 chknot "\.git was scanned"                            'in: .*/\.git/'
 chknot "near-miss string wrongly matched"             'in: .*nearmiss\.ts'
+
+# ---- section 1c: must produce output at all, on whichever engine is in use ----
+# Guards the unbound-array regression. Before the fix these three assertions all
+# failed on the grep path while the scanner still reported a clean run.
+chk    "1c found the quoted 'Sec-V' key"              'loader-family pattern.*secv\.js'
+chk    "1c found the blockchain RPC hostname"         'loader-family pattern.*rpc\.js'
+chknot "1c matched an unquoted Sec-V:"                'loader-family pattern.*secv_unquoted\.js'
+
+# ---- the canary must actually be able to fail --------------------------------
+# A self-test that cannot fail is worse than none: it adds the reassurance of a
+# check without the check. The first version of this canary wrote the fixtures
+# out of ${SIGS[@]} and then searched for them, so it passed with every
+# signature silently rewritten. These cases sabotage one rule at a time in a
+# throwaway copy and require the scanner to refuse to run.
+echo
+echo "== canary: sabotaged rules must abort the scan =="
+SRC=$(dirname "$0")
+sabotage() {  # $1 = description, $2 = sed expression against rules.sh
+  local d; d=$(mktemp -d); mkdir -p "$d/target"
+  # canaries.sh comes along untouched on purpose: the sabotage edits the RULE,
+  # and the evidence it is checked against must not move with it.
+  cp "$SRC/polinrider_scan.sh" "$SRC/rules.sh" "$SRC/canaries.sh" "$d/"
+  sed -i.bak "$2" "$d/rules.sh" && rm -f "$d/rules.sh.bak"
+  local err; err="$d/err"
+  bash "$d/polinrider_scan.sh" "$d/target" >/dev/null 2>"$err"; local rc=$?
+  if [ "$rc" -eq 2 ] && grep -q 'SELF-TEST FAILED' "$err"; then
+    echo "  PASS  $1 -> refused to scan"
+  else
+    echo "  FAIL: $1 -> scanner ran anyway (exit $rc)"; PASS=0
+  fi
+  rm -rf "$d"
+}
+sabotage "core signature no longer matches the wave-1 carrier" 's/rmcej%otb%/BROKEN_XX/'
+# Replace the whole assignment rather than editing inside the pattern: the
+# marker is itself a regex, and escaping its brackets for sed is a good way to
+# write a sabotage that silently sabotages nothing.
+sabotage "build marker no longer matches a shipped build number" "s|^POLINRIDER_BUILD_MARKER=.*|POLINRIDER_BUILD_MARKER='ZZZNOPE'|"
 
 echo
 [ "$PASS" -eq 1 ] && echo "PASS: signature detection and all FP guards correct" || { echo "FAILURES above"; exit 1; }
