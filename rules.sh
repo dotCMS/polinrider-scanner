@@ -136,6 +136,31 @@ POLINRIDER_FONT_MAGICS_HEX='774f4632 774f4646 00010000 4f54544f 74727565 7479703
 # 'A9-3727'           anchored on the A prefix; blind to variant A.
 # commit metadata     author, committer and dates are all forged.
 
+# ===========================================================================
+# 2b. LOADER-FAMILY PATTERNS — informational on a host, hard in a repo sweep.
+#
+# These were left inline in polinrider_scan.sh when #6 moved everything else
+# here: the RPC host list was migrated, 'Sec-V' and helloipbot were not, and the
+# single-source guard did not notice because its list of literals was itself
+# hardcoded. Two indicators in two places is how the sweep went blind to a whole
+# variant in the first place.
+#
+# 'Sec-V' keeps its quotes: the bytes in the payload are the QUOTED object key
+# `],'Sec-V':_0x3d94ba`, so the quote is part of the indicator. Unquoted Sec-V:
+# matches zero real payloads.
+# ===========================================================================
+POLINRIDER_LOADER_FAMILY=(
+  'helloipbot'
+  "$POLINRIDER_RPC_HOSTS"
+  "'Sec-V'"
+)
+
+# Shell-history probe: the shapes a dropper leaves behind in a shell history
+# file. Behavioural rather than a signature, and a separate claim from the
+# indicator sets -- but still a detection rule, so it lives here and not in a
+# script.
+POLINRIDER_HISTORY_RE='eval\(|atob\(|node-fetch|curl.*\|.*(ba)?sh|AUTH_API_KEY|\bwget\b.*http'
+
 # --- helpers ---------------------------------------------------------------
 # Consumers pick the set that matches their false-positive surface.
 polinrider_sigs_for() {   # $1 = repo | host

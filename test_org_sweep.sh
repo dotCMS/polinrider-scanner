@@ -103,6 +103,33 @@ OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
 echo "$OUT" | grep -q 'BUILD-MARKER' && ok "build marker caught the rotated number" || bad "rotated build number MISSED"
 check "exit code" "$RC" "1"
 
+echo "== 8b. the allowlist can be scoped to a ref, and is not scoped to a repo =="
+# Our own repo carries the indicators in refs/pull/* forever, because those refs
+# are read-only. Exempting the path on every ref would also hide an implant
+# injected into the scanner on a branch, so the exemption is ref-scoped.
+R=$(mkrepo allowref)
+printf 'const s = "rmcej%%otb%%";\n' > "$R/decoy.js"
+commit "$R"
+AL=$(mktemp)
+# The fixture's label is its basename, and --local scans refs/heads/* only, so a
+# refs/pull/* scope must NOT match here.
+printf '%s\n' "$(basename "$R")@refs/pull/*:decoy.js" > "$AL"
+OUT=$(bash "$SWEEP" --allowlist "$AL" --local "$R" 2>&1); RC=$?
+check "ref-scoped entry must not match a branch: exit code" "$RC" "1"
+echo "$OUT" | grep -q 'SUPPRESSED' && bad "a refs/pull/* entry suppressed a finding on refs/heads/*" || ok "ref scope respected"
+# Now scope it to the ref that actually carries the file.
+printf '%s\n' "$(basename "$R")@refs/heads/*:decoy.js" > "$AL"
+OUT=$(bash "$SWEEP" --allowlist "$AL" --local "$R" 2>&1)
+echo "$OUT" | grep -q 'SUPPRESSED' && ok "matching ref scope suppresses" || bad "matching ref scope did not suppress"
+# An entry with no ref part keeps the old meaning: any ref.
+printf '%s\n' "$(basename "$R"):decoy.js" > "$AL"
+OUT=$(bash "$SWEEP" --allowlist "$AL" --local "$R" 2>&1)
+echo "$OUT" | grep -q 'SUPPRESSED' && ok "an entry without a ref part still means any ref" || bad "backwards compatibility broken"
+# A suppressed finding must still be PRINTED. An invisible hole is the thing
+# this file's own header warns about.
+echo "$OUT" | grep -q 'SUPPRESSED SIGNATURE' && ok "suppressed findings stay visible" || bad "suppression went silent"
+rm -f "$AL"
+
 echo "== 9b. a DRIFTED RULE refuses to report anything =="
 # Distinct from a broken engine. Here git works perfectly; the rule simply no
 # longer matches real malware. The self-test used to pass this, because it

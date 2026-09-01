@@ -34,7 +34,7 @@
 #     $hits came back empty, and every repo printed "HEAD clean".
 #   * The campaign tag is matched as a PATTERN. The previous version grepped the
 #     literal 'A9-3727', which is the obfuscator.io build. The older _$_ build
-#     writes global['!']='9-3727-2' with no A and was invisible to the sweep.
+#     writes the tag with no A prefix and was invisible to the sweep.
 #   * Whitespace padding is checked over the WHOLE file. The previous version
 #     used `tail -c 2000`, but the padding sits at the START of the payload, so
 #     the last 2000 bytes are pure payload containing no spaces at all.
@@ -128,16 +128,30 @@ fi
 # disappears. Every entry is a permanent hole; narrow the pattern before widening
 # this file, and never allowlist a whole repository.
 N_SUPPRESSED=0
+# Entries are  owner/repo:path-glob  or  owner/repo@ref-glob:path-glob
+#
+# The ref dimension exists because the frozen past is not the same hole as the
+# living present. Our own repository carries the indicators inline in
+# refs/pull/*, permanently -- those refs are read-only, so no amount of tidying
+# the current files removes them. Without a ref scope the only way to stop that
+# firing nightly is to exempt the path on EVERY ref, which would also suppress
+# an implant injected into the scanner on main. Scoping to refs/pull/* keeps the
+# exemption on the bytes we cannot change and leaves main covered.
 is_allowlisted() {   # $1 = repo label, $2 = "<ref>:<path>"
   [ -n "$ALLOWLIST" ] || return 1
   [ -f "$ALLOWLIST" ] || return 1
-  local path="${2#*:}" line pat
+  local ref="${2%%:*}" path="${2#*:}" line pat scope repo refpat
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     pat="${line%%[[:space:]]*}"
-    case "$pat" in
-      "$1":*) case "$path" in ${pat#*:}) return 0 ;; esac ;;
+    scope="${pat%%:*}"          # owner/repo   or   owner/repo@ref-glob
+    case "$scope" in
+      *@*) repo="${scope%%@*}"; refpat="${scope#*@}" ;;
+      *)   repo="$scope";       refpat='*' ;;
     esac
+    [ "$repo" = "$1" ] || continue
+    case "$ref"  in $refpat) ;; *) continue ;; esac
+    case "$path" in ${pat#*:}) return 0 ;; esac
   done < "$ALLOWLIST"
   return 1
 }
