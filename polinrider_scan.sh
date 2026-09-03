@@ -23,8 +23,9 @@ hitcount() { [ -f "$FINDINGS" ] && wc -l < "$FINDINGS" | tr -d ' ' || echo 0; }
 
 # ---- 1. Implant signatures on disk -----------------------------------------
 section "1. Loader signatures (repo clones, project dirs)"
-# NOTE: third signature is the implant's exact usage (atob(process.env.AUTH_API_KEY),
-# fixed-string) - a bare 'AUTH_API_KEY' key name collides with docs/caches and FP'd.
+# NOTE: the third signature is the implant's exact usage of the env var, matched
+# as a fixed string. The bare key name on its own collided with documentation and
+# tool caches and produced false positives. Exact bytes: canaries.sh.
 # Signatures come from rules.sh, never from this file. They used to be defined
 # here and in org_sweep.sh separately and they drifted -- the sweep kept matching
 # the campaign tag as the literal 'A9-3727' long after this script generalised
@@ -184,8 +185,9 @@ while IFS= read -r f; do
 done < <(find "${SCAN_DIRS[@]}" -maxdepth 4 -name '.env' -not -path '*/node_modules/*' 2>/dev/null)
 
 # Campaign build marker (DPRK A#-####-# scheme) as a HARD IOC:
-#   global.i="A9-3727-2"        obfuscator.io build
-#   global['!']='9-3727-2'      older _$_ shuffle build
+#   two spellings, one per build tool: the obfuscator.io builds carry an A
+#   prefix on the tag, the older shuffle builds do not. Exact bytes for both are
+#   in canaries.sh, which is where the self-test gets them from.
 # Matched as a PATTERN, not a literal, so it survives build-number rotation.
 # Promoted out of the informational S1c on evidence: against the one genuinely
 # infected file recovered in this incident (a karma.conf.js of ~31KB in a
@@ -325,17 +327,13 @@ is_scan_scope() {  # keep repo checkouts, drop caches/extensions/app-support
 # NOTE: the A#-####-# build marker used to live here. It is now a HARD IOC in
 # section 1 + classify_config (see the evidence in the S1 comment); keeping it
 # here as well would only double-report it as an unactionable [i] line.
-# NOTE on 'Sec-V': the bytes in the payload are the QUOTED object key 'Sec-V':
-# so the quote is part of the indicator. The pattern here used to be Sec-V:
-# without it, which matches zero real payloads.
+# NOTE on the header-key indicator: the bytes in the payload are a QUOTED object
+# key, so the quote is part of the indicator; the unquoted form matches zero real
+# payloads. The pattern here used to omit it. See rules.sh and canaries.sh.
 # Informational only. These are hard indicators in a REPO scan but not here:
 # on a workstation they appear as quoted text in Claude Code transcripts and in
 # tool caches. rules.sh records that split and the reason for it.
-REGEX_PATS=(
-  'helloipbot'
-  "$POLINRIDER_RPC_HOSTS"
-  "'Sec-V'"
-)
+REGEX_PATS=("${POLINRIDER_LOADER_FAMILY[@]}")
 # The alternation is built from the array. It used to be spelled out as
 # ${REGEX_PATS[0]}|...|${REGEX_PATS[3]} against a 3-element array: under `set -u`
 # that is an unbound variable, the subshell died before grep ran, and section 1c
@@ -460,7 +458,7 @@ ghp=$(git config --global core.hooksPath 2>/dev/null)
 # CONTENT looks like the campaign (fetch/eval/base64/node from hidden paths)
 while IFS= read -r h; do
   [ -e "$h" ] || continue
-  if grep -qiE 'eval\(|atob\(|node-fetch|curl.*\|.*(ba)?sh|AUTH_API_KEY|\bwget\b.*http' "$h" 2>/dev/null; then
+  if grep -qiE "$POLINRIDER_HISTORY_RE" "$h" 2>/dev/null; then
     hit "MALICIOUS-LOOKING git hook: $h"
   else
     echo -e "${YEL}[i] repo git hook (likely husky/pre-commit, verify): $h${NC}"

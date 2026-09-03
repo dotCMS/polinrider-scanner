@@ -11,8 +11,10 @@
 # command line is visible to every user on the box via ps.
 #
 # Output: one machine-readable line per repo -> RESULT <repo> <verdict> <hits>
-#         verdicts: INFECTED · NO_REF_HITS · UNKNOWN
+#         verdicts: INFECTED · SUSPICIOUS · NO_REF_HITS · EMPTY · UNKNOWN
 # Exit:   0 no ref hits anywhere · 1 at least one INFECTED · 2 usage/engine failure
+#         EMPTY does not affect the exit code: nothing was scanned because there
+#         was nothing to scan. UNKNOWN does, because something could not be read.
 #
 # THERE IS NO "CLEAN" VERDICT, deliberately. This sweep clones with --mirror,
 # which fetches refs. An object reachable from no ref is never looked at, and
@@ -34,7 +36,7 @@
 #     $hits came back empty, and every repo printed "HEAD clean".
 #   * The campaign tag is matched as a PATTERN. The previous version grepped the
 #     literal 'A9-3727', which is the obfuscator.io build. The older _$_ build
-#     writes global['!']='9-3727-2' with no A and was invisible to the sweep.
+#     writes the tag with no A prefix and was invisible to the sweep.
 #   * Whitespace padding is checked over the WHOLE file. The previous version
 #     used `tail -c 2000`, but the padding sits at the START of the payload, so
 #     the last 2000 bytes are pure payload containing no spaces at all.
@@ -128,16 +130,30 @@ fi
 # disappears. Every entry is a permanent hole; narrow the pattern before widening
 # this file, and never allowlist a whole repository.
 N_SUPPRESSED=0
+# Entries are  owner/repo:path-glob  or  owner/repo@ref-glob:path-glob
+#
+# The ref dimension exists because the frozen past is not the same hole as the
+# living present. Our own repository carries the indicators inline in
+# refs/pull/*, permanently -- those refs are read-only, so no amount of tidying
+# the current files removes them. Without a ref scope the only way to stop that
+# firing nightly is to exempt the path on EVERY ref, which would also suppress
+# an implant injected into the scanner on main. Scoping to refs/pull/* keeps the
+# exemption on the bytes we cannot change and leaves main covered.
 is_allowlisted() {   # $1 = repo label, $2 = "<ref>:<path>"
   [ -n "$ALLOWLIST" ] || return 1
   [ -f "$ALLOWLIST" ] || return 1
-  local path="${2#*:}" line pat
+  local ref="${2%%:*}" path="${2#*:}" line pat scope repo refpat
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     pat="${line%%[[:space:]]*}"
-    case "$pat" in
-      "$1":*) case "$path" in ${pat#*:}) return 0 ;; esac ;;
+    scope="${pat%%:*}"          # owner/repo   or   owner/repo@ref-glob
+    case "$scope" in
+      *@*) repo="${scope%%@*}"; refpat="${scope#*@}" ;;
+      *)   repo="$scope";       refpat='*' ;;
     esac
+    [ "$repo" = "$1" ] || continue
+    case "$ref"  in $refpat) ;; *) continue ;; esac
+    case "$path" in ${pat#*:}) return 0 ;; esac
   done < "$ALLOWLIST"
   return 1
 }
@@ -206,7 +222,7 @@ grep_revs() {   # $1=label  $2=mode(F|E|IE)  $3=pattern-or-@SIGS  rest=revs
 }
 
 scan_repo() {   # $1 = repo label, cwd = a git dir
-  local label="$1" hits=0 nrefs=0 nbatch=0 failed=0
+  local label="$1" hits=0 soft=0 nrefs=0 nbatch=0 failed=0
   local revfile; revfile=$(mktemp)
 
   if [ "$DEEP" = 1 ]; then
@@ -217,8 +233,19 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
   fi
   nrefs=$(wc -l < "$revfile" | tr -d ' ')
   if [ "$nrefs" -eq 0 ]; then
-    skip "$label: no refs found"; rm -f "$revfile"
-    printf 'RESULT %s UNKNOWN 0\n' "$label"; printf 'UNKNOWN\n' >> "$VERDICTS"; return
+    # EMPTY, not UNKNOWN. The clone SUCCEEDED and contained no refs, which is a
+    # repository with nothing in it -- three of ours are exactly that. UNKNOWN
+    # means "this was not proven", and it drives exit 2; applying it here would
+    # put a permanent 2 and three permanent warnings on every nightly run, for
+    # repositories where there is nothing to prove. People stop reading a report
+    # that is never clean.
+    #
+    # The two cases are distinguishable and stay distinguished: a clone that
+    # fails has its own path above and remains UNKNOWN. Zero refs after a
+    # successful clone is a fact about the repository, not about the sweep.
+    skip "$label: clone succeeded and contained no refs - empty repository, nothing to scan"
+    rm -f "$revfile"
+    printf 'RESULT %s EMPTY 0\n' "$label"; printf 'EMPTY\n' >> "$VERDICTS"; return
   fi
 
   local pullrefs; pullrefs=$(grep -c '^refs/pull/' "$revfile" || true)
@@ -230,7 +257,21 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
     nbatch=$((nbatch+1))
     local -a revs=(); while IFS= read -r r; do revs+=("$r"); done < "$b"
     local o line
+    # HARD vs SOFT. A campaign signature, the build marker or a config.bat added
+    # to .gitignore are the implant itself: finding one means the repository is
+    # infected. A long whitespace run is how the implant HIDES -- valuable, and
+    # the reason human review missed this campaign entirely, but on its own it is
+    # a shape that vendored build output also has. The first full sweep found one
+    # such file, a 1.6 MB bundle, on 73 refs of dotCMS/core, with no signature and
+    # no marker anywhere in it.
+    #
+    # Treating both as the same finding meant one vendored bundle marked the main
+    # repository INFECTED every night. So they are counted apart and the verdicts
+    # differ. Nothing is silenced: a shape-only repository is reported as
+    # SUSPICIOUS, with its findings printed, and it is still not called clean.
     report() {   # $1 = finding class, stdin = "<ref>:<path>" lines
+      local kind=hard
+      [ "$1" = WHITESPACE-PAD ] && kind=soft
       while IFS= read -r line; do
         [ -n "$line" ] || continue
         if is_allowlisted "$label" "$line"; then
@@ -238,7 +279,7 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
           N_SUPPRESSED=$((N_SUPPRESSED+1))
         else
           printf '  !!! %s  %s\n' "$1" "$line"
-          hits=$((hits+1))
+          if [ "$kind" = hard ]; then hits=$((hits+1)); else soft=$((soft+1)); fi
         fi
       done
     }
@@ -246,7 +287,19 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
     [ -n "$o" ] && report SIGNATURE <<< "$o"
     o=$(grep_revs "$label marker" E "$BUILD_MARKER" "${revs[@]}") || failed=1
     [ -n "$o" ] && report BUILD-MARKER <<< "$o"
-    o=$(grep_revs "$label wsrun" IE "$WSRUN" "${revs[@]}") || failed=1
+    # The whitespace rule does not run over formats where a long run of spaces
+    # is ordinary. Measured on the first full sweep: 4,122 of 4,159 hits were
+    # markdown, all of them pipe-aligned tables padding cells to 209 spaces.
+    # A control that is never clean gets switched off, so this is not cosmetic.
+    #
+    # This is NOT a blind spot. The three literal signatures and the build
+    # marker still scan every file, including these, so a carrier hidden in a
+    # .md is still caught by content. What is skipped is a SHAPE hint in the
+    # formats where the shape carries no information.
+    o=$(grep_revs "$label wsrun" IE "$WSRUN" "${revs[@]}" -- \
+          ':(exclude)*.md' ':(exclude)*.markdown' ':(exclude)*.txt' \
+          ':(exclude)*.rst' ':(exclude)*.adoc' ':(exclude)*.csv' \
+          ':(exclude)*.tsv' ':(exclude)*.svg') || failed=1
     [ -n "$o" ] && report WHITESPACE-PAD <<< "$o"
     o=$(grep_revs "$label gitignore" F "$GITIGNORE_ADDED" "${revs[@]}" -- '*.gitignore' '.gitignore') || failed=1
     [ -n "$o" ] && report GITIGNORE-CONFIG.BAT <<< "$o"
@@ -257,10 +310,11 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
   local verdict
   if [ "$hits" -gt 0 ]; then verdict=INFECTED
   elif [ "$failed" = 1 ]; then verdict=UNKNOWN
+  elif [ "$soft" -gt 0 ]; then verdict=SUSPICIOUS
   # NO_REF_HITS, never CLEAN: see the header. No ref reaches a signature; that
   # is not the same claim as the repo being free of the implant.
   else verdict=NO_REF_HITS; fi
-  printf 'RESULT %s %s %s\n' "$label" "$verdict" "$hits"
+  printf 'RESULT %s %s %s\n' "$label" "$verdict" "$((hits + soft))"
   printf '%s\n' "$verdict" >> "$VERDICTS"
   [ "$verdict" = INFECTED ] && return 1
   return 0
@@ -318,8 +372,10 @@ rm -f "$REPO_LIST"
 N_INF=$(grep -c '^INFECTED$' "$VERDICTS" || true)
 N_UNK=$(grep -c '^UNKNOWN$'  "$VERDICTS" || true)
 N_CLN=$(grep -c '^NO_REF_HITS$' "$VERDICTS" || true)
+N_EMP=$(grep -c '^EMPTY$'       "$VERDICTS" || true)
+N_SUS=$(grep -c '^SUSPICIOUS$'  "$VERDICTS" || true)
 echo
-echo "SWEEP COMPLETE: $NREPOS requested | $N_CLN with no ref hits | $N_INF infected | $N_UNK not scanned"
+echo "SWEEP COMPLETE: $NREPOS requested | $N_CLN with no ref hits | $N_EMP empty | $N_SUS shape-only | $N_INF infected | $N_UNK not scanned"
 coverage_note
 # UNKNOWN is not clean. A repo that failed to clone or whose engine errored has
 # been proven nothing, and saying so is the whole point of the exit codes.

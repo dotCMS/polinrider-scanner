@@ -1,0 +1,57 @@
+# PolinRider sweep allowlist.
+#
+# Format:  owner/repo:path-glob      (one per line, each preceded by a "# why:")
+#
+# Every entry here is a permanent hole. Narrow the pattern before widening this
+# file. NEVER allowlist a whole repository - a compromised repo would then be
+# invisible. Suppressed findings are still printed, tagged SUPPRESSED, so the
+# hole stays visible in every run.
+#
+# THIS FILE SHIPS IN THE IMAGE, not as editable config. Which files are exempt
+# from malware detection is a security decision and belongs in a reviewed diff,
+# not in something an operator can edit in place.
+#
+# REVIEW IT WHENEVER FILES MOVE. #3 moved every signature out of the two scripts
+# and into rules.sh, and this file was not updated: it went on exempting two
+# files that no longer carry any indicator -- two holes with no justification,
+# through which an implant injected into the scanner itself would have been
+# suppressed -- while rules.sh, which does carry them, was not listed at all.
+# An allowlist entry that has outlived its reason is worse than a missing one.
+
+# why: rules.sh is the single source of truth for the detection rules, so it
+# contains every literal indicator by definition. canaries.sh holds byte-exact
+# fragments of the real carriers, deliberately, so that a drifted rule can be
+# caught. Both are supposed to match. Scoped to these two files.
+dotCMS/polinrider-scanner:rules.sh
+dotCMS/polinrider-scanner:canaries.sh
+
+# why: the fixture suites hardcode the indicators as test data, on purpose and
+# independently of rules.sh, so a rule cannot be validated against itself.
+dotCMS/polinrider-scanner:test_*.sh
+
+# why: the incident write-ups quote the campaign terms verbatim as the detection
+# rule. Path-scoped; any other file in the repo is still scanned.
+dotCMS/polinrider-scanner:README.md
+dotCMS/polinrider-scanner:HANDOFF.md
+dotCMS/polinrider-scanner:incident-report-*.md
+dotCMS/polinrider-scanner:continuous-monitoring-plan.md
+dotCMS/polinrider-scanner:sweep-allowlist*
+
+# why: incident documentation quotes the three campaign terms verbatim as the
+# detection rule. Path-scoped: any OTHER file in core is still scanned.
+dotCMS/core:docs/backend/HANDOFF-continuous-monitoring.md
+
+# why: refs/pull/1..3 froze the versions of these two scripts from before #6
+# moved every indicator into rules.sh, and pull-request refs are read-only -- we
+# cannot rewrite or delete them, so they will match for as long as the repo
+# exists. Scoped to those refs ON PURPOSE: on refs/heads/* these two files are
+# expected to carry nothing, so an implant injected into the scanner itself still
+# fires. That distinction is the reason the ref dimension exists at all.
+dotCMS/polinrider-scanner@refs/pull/*:org_sweep.sh
+dotCMS/polinrider-scanner@refs/pull/*:polinrider_scan.sh
+
+# NOT allowlisted, deliberately:
+#   org_sweep.sh and polinrider_scan.sh on refs/heads/* - they source rules.sh
+#   and carry no indicator of their own. If either matches on a branch, that is
+#   a finding about the scanner and we want to hear about it.
+#   app/* - the PR-check service contains no indicators either.

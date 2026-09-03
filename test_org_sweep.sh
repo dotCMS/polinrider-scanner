@@ -103,6 +103,87 @@ OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
 echo "$OUT" | grep -q 'BUILD-MARKER' && ok "build marker caught the rotated number" || bad "rotated build number MISSED"
 check "exit code" "$RC" "1"
 
+echo "== 8b. the allowlist can be scoped to a ref, and is not scoped to a repo =="
+# Our own repo carries the indicators in refs/pull/* forever, because those refs
+# are read-only. Exempting the path on every ref would also hide an implant
+# injected into the scanner on a branch, so the exemption is ref-scoped.
+R=$(mkrepo allowref)
+printf 'const s = "rmcej%%otb%%";\n' > "$R/decoy.js"
+commit "$R"
+AL=$(mktemp)
+# The fixture's label is its basename, and --local scans refs/heads/* only, so a
+# refs/pull/* scope must NOT match here.
+printf '%s\n' "$(basename "$R")@refs/pull/*:decoy.js" > "$AL"
+OUT=$(bash "$SWEEP" --allowlist "$AL" --local "$R" 2>&1); RC=$?
+check "ref-scoped entry must not match a branch: exit code" "$RC" "1"
+echo "$OUT" | grep -q 'SUPPRESSED' && bad "a refs/pull/* entry suppressed a finding on refs/heads/*" || ok "ref scope respected"
+# Now scope it to the ref that actually carries the file.
+printf '%s\n' "$(basename "$R")@refs/heads/*:decoy.js" > "$AL"
+OUT=$(bash "$SWEEP" --allowlist "$AL" --local "$R" 2>&1)
+echo "$OUT" | grep -q 'SUPPRESSED' && ok "matching ref scope suppresses" || bad "matching ref scope did not suppress"
+# An entry with no ref part keeps the old meaning: any ref.
+printf '%s\n' "$(basename "$R"):decoy.js" > "$AL"
+OUT=$(bash "$SWEEP" --allowlist "$AL" --local "$R" 2>&1)
+echo "$OUT" | grep -q 'SUPPRESSED' && ok "an entry without a ref part still means any ref" || bad "backwards compatibility broken"
+# A suppressed finding must still be PRINTED. An invisible hole is the thing
+# this file's own header warns about.
+echo "$OUT" | grep -q 'SUPPRESSED SIGNATURE' && ok "suppressed findings stay visible" || bad "suppression went silent"
+rm -f "$AL"
+
+echo "== 8d. a markdown table is not a payload =="
+# The first full sweep produced 4,159 whitespace findings. 4,122 were markdown,
+# every one a pipe-aligned table padding cells past the 200-space threshold.
+# A control that reports the main repository as infected every night is a
+# control someone turns off.
+R=$(mkrepo mdtable)
+{ printf '| Input | Type | Required | Description |\n'
+  printf '| %s | x |\n' "$(head -c 260 /dev/zero | tr '\0' ' ')"; } > "$R/README.md"
+commit "$R"
+OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
+check "a padded markdown table must not fail the run" "$RC" "0"
+echo "$OUT" | grep -q 'WHITESPACE-PAD' && bad "markdown still trips the shape rule" || ok "markdown excluded from the shape rule"
+
+echo "== 8e. the shape rule still works where the shape means something =="
+# Excluding markdown must not turn the rule off. The real carriers hid behind
+# 507 spaces appended to a line of a JS config file, which is the whole reason
+# human review missed this campaign.
+R=$(mkrepo padjs)
+{ printf '};'; head -c 520 /dev/zero | tr '\0' ' '; printf 'var x=1;\n'; } > "$R/vite.config.js"
+commit "$R"
+OUT=$(bash "$SWEEP" --local "$R" 2>&1)
+echo "$OUT" | grep -q 'WHITESPACE-PAD' && ok "a padded .js still fires" || bad "the shape rule stopped working on JS"
+
+echo "== 8f. a shape hint alone is SUSPICIOUS, a signature is INFECTED =="
+# One vendored 1.6 MB bundle on 73 refs of dotCMS/core carried the shape and no
+# indicator at all. Counting it as INFECTED made the main repository infected
+# nightly. Nothing is silenced: shape-only is still reported, still not clean.
+echo "$OUT" | grep -qE 'RESULT .* SUSPICIOUS' && ok "shape-only repo is SUSPICIOUS" || bad "shape-only repo not reported SUSPICIOUS"
+echo "$OUT" | grep -qE 'RESULT .* INFECTED' && bad "a shape hint alone was called INFECTED" || ok "shape alone is not INFECTED"
+echo "$OUT" | grep -qE 'RESULT .* NO_REF_HITS' && bad "a shape hint was reported as clean" || ok "shape-only is not clean either"
+
+R=$(mkrepo realcarrier)
+{ printf '};'; head -c 520 /dev/zero | tr '\0' ' '; printf 'const s="rmcej%%otb%%";\n'; } > "$R/karma.conf.js"
+commit "$R"
+OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
+check "a real carrier still fails the run" "$RC" "1"
+echo "$OUT" | grep -qE 'RESULT .* INFECTED' && ok "signature plus shape is INFECTED" || bad "a real carrier was downgraded"
+
+echo "== 8c. an empty repository is EMPTY, not UNKNOWN =="
+# Found by the first full run: three of our repositories are genuinely empty,
+# 0 KB. They came back UNKNOWN, which means "not proven" and drives exit 2, so
+# every nightly run would have carried three permanent warnings and a permanent
+# failure for repositories with nothing in them. A report that is never clean
+# stops being read.
+R=$(mkrepo emptyrepo)          # initialised, never committed to
+OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
+check "empty repo must not fail the run" "$RC" "0"
+echo "$OUT" | grep -qE 'RESULT .* EMPTY' && ok "empty repo reported as EMPTY" || bad "empty repo not reported as EMPTY"
+echo "$OUT" | grep -qE 'RESULT .* UNKNOWN' && bad "empty repo still reported UNKNOWN" || ok "not conflated with unreadable"
+echo "$OUT" | grep -qE 'RESULT .* NO_REF_HITS' && bad "empty repo counted as scanned and clean" || ok "not counted as clean either"
+# The distinction has to survive in the wording, not just the token: a reader
+# needs to know the clone worked and the repository has nothing in it.
+echo "$OUT" | grep -q 'empty repository' && ok "says what EMPTY means" || bad "EMPTY is not explained in the output"
+
 echo "== 9b. a DRIFTED RULE refuses to report anything =="
 # Distinct from a broken engine. Here git works perfectly; the rule simply no
 # longer matches real malware. The self-test used to pass this, because it
