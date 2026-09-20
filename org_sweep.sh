@@ -3,7 +3,7 @@
 #
 #   org_sweep.sh                          # every repo in the default orgs
 #   org_sweep.sh --orgs dotCMS            # one org
-#   org_sweep.sh --repos dotCMS/support   # named repos only
+#   org_sweep.sh --repos your-org/your-repo   # named repos only
 #   org_sweep.sh --local /path/to/repo    # an existing clone, no network
 #   org_sweep.sh --deep                   # every commit, not just ref tips (slow)
 #
