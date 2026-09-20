@@ -64,3 +64,28 @@ bash test_reinfection_vectors.sh
 - Socket: PolinRider supply-chain campaign
   (https://socket.dev/blog/polinrider-north-korea-linked-supply-chain-campaign-expands)
 - MITRE ATT&CK: S1245 (InvisibleFerret), G1052 (Contagious Interview)
+
+## License
+
+Copyright (C) 2026 dotCMS LLC
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE) for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+GPLv3 is the license dotCMS core itself carried before it moved to the Business
+Source License. It is deliberate here: anyone — individual, company or vendor —
+may run this scanner, for any purpose including commercial use, at no cost. What
+copyleft prevents is enclosure: if you distribute a modified version, those
+modifications ship under GPLv3 with source, so improvements to the detection
+rules come back to everyone relying on them.
+
+Contributions are welcome and are accepted under the same license.
+
+All third-party components incorporated into this repository remain under the
+original license provided by the owner of the applicable component.
