@@ -125,6 +125,17 @@ sed 's|^BUILD_MARKER=.*|BUILD_MARKER="WILL_NEVER_MATCH"|' "$SWEEP" > "$TMP/broke
 R=$(mkrepo forbroken); printf 'x\n' > "$R/a.js"; commit "$R"
 bash "$TMP/broken.sh" --local "$R" >/dev/null 2>&1; check "exit code" "$?" "2"
 
+echo "== 10. a bare run refuses to sweep anything =="
+# There is deliberately no default org. Without the guard the org loop iterates
+# zero times, enumerates nothing and exits 0 -- a green run that looked at no
+# repositories. Asserting on the message, not just the exit code: a missing
+# token also exits 2, and a test that cannot tell those apart passes for the
+# wrong reason.
+OUT=$(bash "$SWEEP" 2>&1); RC=$?
+check "exit code" "$RC" "2"
+echo "$OUT" | grep -q 'nothing to sweep' && ok "guard fired, not the token check" || bad "bare run did not hit the guard"
+echo "$OUT" | grep -qE 'RESULT |SWEEP COMPLETE' && bad "a bare run produced sweep output" || ok "no sweep performed"
+
 echo
 echo "PASS: $PASS   FAIL: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

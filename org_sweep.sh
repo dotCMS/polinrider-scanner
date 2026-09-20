@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Sweep GitHub org repos for the PolinRider implant.
 #
-#   org_sweep.sh                          # every repo in the default orgs
-#                                         # (defaults: dotCMS dotcms-community)
-#   org_sweep.sh --orgs your-org          # one org
+#   org_sweep.sh --orgs your-org          # every repo in one org
+#   org_sweep.sh --orgs org-a,org-b       # several orgs
 #   org_sweep.sh --repos your-org/your-repo   # named repos only
 #   org_sweep.sh --local /path/to/repo    # an existing clone, no network
 #   org_sweep.sh --deep                   # every commit, not just ref tips (slow)
@@ -45,7 +44,7 @@
 
 set -uo pipefail
 
-ORGS="dotCMS dotcms-community"
+ORGS=""
 REPOS_ARG=""
 LOCAL_PATH=""
 DEEP=0
@@ -65,6 +64,16 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+# One of --orgs/--repos/--local is required; there is deliberately no default
+# org. A bare run used to sweep dotCMS's own orgs, which is the wrong blast
+# radius for a tool we hand to the public. The guard is not cosmetic: with no
+# default and no guard the org loop iterates zero times, enumerates nothing,
+# and the run exits 0 -- a green sweep of no repositories.
+if [ -z "$LOCAL_PATH" ] && [ -z "$REPOS_ARG" ] && [ -z "$ORGS" ]; then
+  echo "nothing to sweep: pass --orgs, --repos or --local (see --help)" >&2
+  exit 2
+fi
 
 # --- indicators -------------------------------------------------------------
 # Defined in rules.sh, never here. They used to live in this file and in
