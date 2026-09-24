@@ -225,11 +225,24 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
   local label="$1" hits=0 soft=0 nrefs=0 nbatch=0 failed=0
   local revfile; revfile=$(mktemp)
 
+  local enum_rc=0
   if [ "$DEEP" = 1 ]; then
-    git rev-list --all > "$revfile" 2>/dev/null
+    git rev-list --all > "$revfile" 2>/dev/null; enum_rc=$?
     note "$label: DEEP mode - every commit"
   else
-    git for-each-ref --format='%(refname)' > "$revfile" 2>/dev/null
+    git for-each-ref --format='%(refname)' > "$revfile" 2>/dev/null; enum_rc=$?
+  fi
+  # An empty revfile has two causes and they mean opposite things: the repository
+  # has no refs, or the enumeration never ran. Reading only the file cannot tell
+  # them apart, and the wrong guess is the one this tool exists to prevent -- a
+  # corrupt or truncated mirror, or a disk that filled while writing the file,
+  # would be reported as "nothing to scan" and leave exit 0 behind. grep_revs
+  # already draws this line for git grep: rc 1 is "no match", rc>1 is "did not
+  # run, NOT proven clean". Enumeration gets the same treatment.
+  if [ "$enum_rc" -ne 0 ]; then
+    skip "$label: ref enumeration FAILED (rc=$enum_rc) - this repo is NOT proven clean"
+    rm -f "$revfile"
+    printf 'RESULT %s UNKNOWN 0\n' "$label"; printf 'UNKNOWN\n' >> "$VERDICTS"; return
   fi
   nrefs=$(wc -l < "$revfile" | tr -d ' ')
   if [ "$nrefs" -eq 0 ]; then
@@ -241,8 +254,10 @@ scan_repo() {   # $1 = repo label, cwd = a git dir
     # that is never clean.
     #
     # The two cases are distinguishable and stay distinguished: a clone that
-    # fails has its own path above and remains UNKNOWN. Zero refs after a
-    # successful clone is a fact about the repository, not about the sweep.
+    # fails has its own path above, and an enumeration that fails is caught by
+    # the rc check above -- both stay UNKNOWN. Reaching here means the clone
+    # succeeded AND the enumeration ran AND it returned nothing, which is a fact
+    # about the repository, not about the sweep.
     skip "$label: clone succeeded and contained no refs - empty repository, nothing to scan"
     rm -f "$revfile"
     printf 'RESULT %s EMPTY 0\n' "$label"; printf 'EMPTY\n' >> "$VERDICTS"; return

@@ -20,6 +20,8 @@
 #   SLACK_WEBHOOK_DETAIL   optional, full findings, keep private
 #   HEARTBEAT_PATH         default /var/lib/polinrider/last-success.json
 #   BATCH_SIZE             default 30
+#   SOLO_REPOS             default dotCMS/core; repositories whose scan outlasts a
+#                          token, each run in a batch of one so nothing queues behind
 #   KNOWN_FINDINGS         default known-findings.json beside this script
 #   SWEEP_ALLOWLIST        default sweep-allowlist beside this script
 #
@@ -165,13 +167,53 @@ log "SCOPE $N_SCAN repositories to scan, $N_ARCH archived and skipped"
 [ "$N_SCAN" -gt 0 ] || die "the token reaches no repositories at all"
 
 : > "$WORK/log"
-n=0; i=0
+n=0; i=0; N_DONE=0
 # read into an array the long way: mapfile is bash 4, and this tool supports the
 # bash 3.2 that macOS ships, on purpose.
 ALL=()
 while IFS= read -r r; do [ -n "$r" ] && ALL+=("$r"); done < "$WORK/repos"
+
+# Repositories that take longer to scan than a token lives, each given a batch
+# of its own and run last.
+#
+# The token is needed for ONE step: the mirror clone. After that the scan is
+# git grep on local disk and needs no credential at all. So a huge repository
+# is not itself at risk - its own clone finishes in the first minutes, while
+# the token is fresh. What breaks is everything QUEUED BEHIND IT: dotCMS/core
+# takes about four and a half hours (21,289 refs, 18,314 of them pull-request
+# refs), installation tokens last one, and the next repository in the same
+# batch then clones with a credential that died three and a half hours ago.
+# Those come back UNKNOWN - honest, but it means the same tail of the batch is
+# never examined, night after night.
+#
+# Isolating them fixes exactly that: nothing waits behind them, and each still
+# gets its own fresh token. Last rather than first so the bulk of the estate is
+# covered early; if the long one fails, coverage reconciliation below still
+# refuses to certify the night.
+SOLO="${SOLO_REPOS:-dotCMS/core}"
+REST=(); LONG=()
+for r in ${ALL+"${ALL[@]}"}; do
+  case " $(echo "$SOLO" | tr ',' ' ') " in
+    *" $r "*) LONG+=("$r") ;;
+    *)        REST+=("$r") ;;
+  esac
+done
+[ ${#LONG[@]} -gt 0 ] && log "SOLO ${#LONG[@]} oversized repositor(y|ies) run one per batch: ${LONG[*]}"
+ALL=(${REST+"${REST[@]}"} ${LONG+"${LONG[@]}"})
+FIRST_LONG=${#REST[@]}
+
 while [ $i -lt ${#ALL[@]} ]; do
-  chunk=("${ALL[@]:$i:$BATCH}")
+  # Batch size drops to one once the oversized tail is reached, and a normal
+  # batch is truncated so it cannot spill into that tail - otherwise the last
+  # ordinary batch would drag an oversized repository in with it, which is the
+  # pairing this whole split exists to prevent.
+  if [ $i -ge $FIRST_LONG ]; then
+    this_batch=1
+  else
+    this_batch=$BATCH
+    [ $((i + this_batch)) -gt $FIRST_LONG ] && this_batch=$((FIRST_LONG - i))
+  fi
+  chunk=("${ALL[@]:$i:$this_batch}")
   n=$((n+1))
   # A fresh token per batch. Installation tokens last an hour and the clone URL
   # carries one inline, so a long run starts failing halfway through - as
@@ -181,10 +223,35 @@ while [ $i -lt ${#ALL[@]} ]; do
   # tee, not redirect: the operator's log is the record of what was found. A
   # findings file in a tempdir vanishes on exit, and with no webhook configured
   # the run would leave nothing behind at all.
+  before=$(grep -c '^RESULT ' "$WORK/log" || true)
   GH_TOKEN="$TOKEN" bash "$SWEEP" --allowlist "$ALLOWLIST" --repos "${chunk[*]}" 2>&1 \
     | tee -a "$WORK/log"
-  i=$((i+BATCH))
+  after=$(grep -c '^RESULT ' "$WORK/log" || true)
+  # Reconcile coverage, because the whole report below is built by grepping
+  # RESULT lines out of this log -- so a batch that produced NONE is
+  # indistinguishable from a batch that looked at everything and found nothing.
+  # org_sweep.sh exits without any RESULT line whenever it refuses to certify:
+  # engine self-test failure, canaries not loading, rules.sh missing, no token,
+  # allowlist not found. Silently, that refusal became a clean night, complete
+  # with a success heartbeat.
+  #
+  # Reading $? instead would not work: org_sweep.sh overloads exit 2 for BOTH
+  # "the engine failed" and "at least one repo came back UNKNOWN", and the
+  # second is an ordinary outcome already handled from the RESULT lines.
+  # Counting what came back is the question we actually care about, and it also
+  # catches a mid-batch kill (OOM, cron timeout) and truncated output.
+  got=$((after - before))
+  [ "$got" -eq "${#chunk[@]}" ] \
+    || die "batch $n: ${#chunk[@]} repositories sent, $got reported - the sweep did not run to completion"
+  N_DONE=$((N_DONE + got))
+  i=$((i+this_batch))
 done
+
+# Nothing below may treat N_SCAN as a count of what was examined: it is the
+# number of repositories in scope. They are equal only because every batch
+# reconciled above, and that is the fact worth printing.
+[ "$N_DONE" -eq "$N_SCAN" ] \
+  || die "$N_SCAN repositories in scope but $N_DONE reported - refusing to certify a partial sweep"
 
 # --- report -----------------------------------------------------------------
 TOOK=$(( $(date -u '+%s') - START ))
@@ -229,7 +296,7 @@ PY
 N_NOVEL=$(grep -c . "$WORK/novel" 2>/dev/null || true)
 N_KNOWN=$(grep -c . "$WORK/known" 2>/dev/null || true)
 
-SUMMARY="$N_SCAN scanned · $N_CLEAN no ref hits · $N_EMPTY empty · $N_SUSP shape-only · $(echo "$INFECTED" | grep -c . ) infected · $(echo "$UNKNOWN" | grep -c .) not scanned · $N_KNOWN known · ${TOOK}s"
+SUMMARY="$N_DONE scanned · $N_CLEAN no ref hits · $N_EMPTY empty · $N_SUSP shape-only · $(echo "$INFECTED" | grep -c . ) infected · $(echo "$UNKNOWN" | grep -c .) not scanned · $N_KNOWN known · ${TOOK}s"
 log "SWEEP COMPLETE: $SUMMARY"
 log "COVERAGE refs only; objects reachable from no ref are not covered by this method and cannot be enumerated"
 
@@ -245,6 +312,6 @@ fi
 notify info "clean run. $SUMMARY" ""
 mkdir -p "$(dirname "$HEARTBEAT")" 2>/dev/null
 printf '{"last_success":"%s","scanned":%s,"took_seconds":%s}\n' \
-  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$N_SCAN" "$TOOK" > "$HEARTBEAT" 2>/dev/null \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$N_DONE" "$TOOK" > "$HEARTBEAT" 2>/dev/null \
   || printf 'WARNING could not write the heartbeat at %s\n' "$HEARTBEAT" >&2
 exit 0

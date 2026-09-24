@@ -206,6 +206,38 @@ sed 's|^BUILD_MARKER=.*|BUILD_MARKER="WILL_NEVER_MATCH"|' "$SWEEP" > "$TMP/broke
 R=$(mkrepo forbroken); printf 'x\n' > "$R/a.js"; commit "$R"
 bash "$TMP/broken.sh" --local "$R" >/dev/null 2>&1; check "exit code" "$?" "2"
 
+echo "== 10. a repository whose refs cannot be enumerated is UNKNOWN, not EMPTY =="
+# EMPTY says "there was nothing to read" and leaves exit 0. UNKNOWN says "this
+# was not proven" and drives exit 2. A mirror whose refs are unreadable - a
+# corrupt or truncated clone, or a disk that filled while the ref list was being
+# written - produces an empty ref list for the opposite reason, and reading only
+# the file cannot tell the two apart. The distinction is the whole point of the
+# verdict vocabulary, so it is pinned here.
+R=$(mkrepo corrupt); printf 'x\n' > "$R/a.js"; commit "$R"
+rm -rf "$R/.git/refs" "$R/.git/packed-refs"
+OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
+check "corrupt repo verdict" "$(echo "$OUT" | grep -c 'RESULT .* UNKNOWN')" "1"
+echo "$OUT" | grep -q 'RESULT .* EMPTY' && bad "a corrupt mirror was called EMPTY" \
+                                        || ok "corrupt mirror was not called EMPTY"
+check "corrupt repo exit code" "$RC" "2"
+
+echo "== 11. a directory that is not a git repository at all is UNKNOWN =="
+D="$TMP/notarepo"; mkdir -p "$D"; printf 'x\n' > "$D/a.js"
+OUT=$(bash "$SWEEP" --local "$D" 2>&1); RC=$?
+echo "$OUT" | grep -q 'RESULT .* EMPTY' && bad "a non-repository was called EMPTY" \
+                                        || ok "non-repository was not called EMPTY"
+check "non-repository exit code" "$RC" "2"
+
+echo "== 12. a genuinely empty repository is still EMPTY, and still exit 0 =="
+# The legitimate win the EMPTY verdict was added for: three of ours are real
+# empty repositories, and reporting them UNKNOWN put a permanent exit 2 and
+# three permanent warnings on every nightly run. Fixing case 10 must not undo
+# this - a report that is never clean is a report nobody reads.
+R=$(mkrepo genuinelyempty)
+OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
+check "empty repo verdict" "$(echo "$OUT" | grep -c 'RESULT .* EMPTY')" "1"
+check "empty repo exit code" "$RC" "0"
+
 echo
 echo "PASS: $PASS   FAIL: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
