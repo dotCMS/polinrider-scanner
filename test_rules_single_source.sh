@@ -48,12 +48,35 @@ polinrider_sigs_for repo | grep -qxF '9-3727-2' \
   && ok "repo set has the bare campaign tag" || bad "repo set lost the bare campaign tag"
 
 echo "== no script defines a rule of its own =="
-# Any signature literal appearing outside rules.sh, other than in a comment or
-# in a self-test canary, is a second source of truth waiting to drift.
+# Any indicator appearing outside rules.sh, other than in a comment, is a second
+# source of truth waiting to drift.
+#
+# The list of literals to look for is DERIVED FROM rules.sh, not written out
+# here. It used to be four hardcoded strings, and it missed two indicators that
+# polinrider_scan.sh was still defining inline -- helloipbot and the quoted
+# header key -- because nobody added them to this line when they were added to
+# the rules. A guard with a hand-maintained list of what to guard is the same
+# drift it exists to prevent, one level up.
+ALL_INDICATORS=$(
+  { polinrider_sigs_for repo; polinrider_sigs_for host
+    for p in "${POLINRIDER_LOADER_FAMILY[@]}"; do printf '%s\n' "$p"; done
+    printf '%s\n' "$POLINRIDER_BUILD_MARKER" "$POLINRIDER_WSRUN" "$POLINRIDER_HISTORY_RE"
+  } | sort -u
+)
+[ -n "$ALL_INDICATORS" ] && ok "derived the indicator list from rules.sh" \
+  || bad "could not derive any indicator from rules.sh"
+
 for f in polinrider_scan.sh org_sweep.sh; do
-  hits=$(grep -n "rmcej%otb%\|wuqktamceigynzbosdctpusocrjhrflovnxrt\|atob(process\.env\.AUTH_API_KEY\|774f4632" "$f" \
-         | grep -v '^[0-9]*: *#' || true)
-  [ -z "$hits" ] && ok "$f defines no signature inline" || { bad "$f defines signatures inline:"; echo "$hits" | sed 's/^/        /'; }
+  hits=""
+  while IFS= read -r ind; do
+    [ -n "$ind" ] || continue
+    # Comments may quote an indicator; code may not. A line whose first
+    # non-space character is # is documentation.
+    h=$(grep -nF -- "$ind" "$f" 2>/dev/null | grep -v '^[0-9]*: *#' || true)
+    [ -n "$h" ] && hits="$hits$h"$'\n'
+  done <<< "$ALL_INDICATORS"
+  hits=$(printf '%s' "$hits" | sed '/^$/d')
+  [ -z "$hits" ] && ok "$f defines no indicator inline" || { bad "$f defines indicators inline:"; echo "$hits" | sed 's/^/        /'; }
   # Sourced indirectly via RULES_FILE, so check both halves: that the path is
   # built from rules.sh, and that it is actually sourced.
   if grep -q 'RULES_FILE=.*rules\.sh' "$f" && grep -qF '. "$RULES_FILE"' "$f"; then

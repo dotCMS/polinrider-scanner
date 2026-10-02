@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "Malware we have already found and cannot yet remove. NOT an allowlist.",
+    "The allowlist says 'this is not malware'. This says 'this IS malware, we",
+    "know about it, and removing it is on someone else's desk'. Entries here are",
+    "still detected, still printed and still counted in every report - they just",
+    "do not raise the alarm, so that the night a NEW repository appears is a",
+    "night somebody actually looks.",
+    "",
+    "Remove an entry the moment the underlying thing is gone. An entry that has",
+    "outlived its reason is a blind spot, which is exactly what went wrong with",
+    "the allowlist in #8."
+  ],
+  "findings": [
+    {
+      "repo": "dotCMS/cloud-clientplugins",
+      "ref": "refs/pull/20/head",
+      "path": "prodbim/Applications/search-engine/karma.conf.js",
+      "reason": "May 2026 incident, variant B carrier. Pull-request refs are read-only; deletion requires the pending GitHub Support request. Branch deleted, main clean."
+    },
+    {
+      "repo": "dotCMS/cloud-clientplugins",
+      "ref": "refs/pull/28/head",
+      "path": "prodbim/Applications/search-engine/karma.conf.js",
+      "reason": "Same blob referenced from a second pull request. Same Support request."
+    },
+    {
+      "repo": "dotCMS/cloud-clientplugins",
+      "ref": "refs/pull/20/head",
+      "path": ".gitignore",
+      "reason": "config.bat added to .gitignore so a dropped file of that name would not show in git status. Part of the same payload, same refs, same Support request."
+    },
+    {
+      "repo": "dotCMS/cloud-clientplugins",
+      "ref": "refs/pull/28/head",
+      "path": ".gitignore",
+      "reason": "As above, second pull request."
+    }
+  ]
+}
