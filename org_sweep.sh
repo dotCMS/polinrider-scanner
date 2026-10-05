@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Sweep dotCMS repos for the PolinRider implant.
+# Sweep GitHub org repos for the PolinRider implant.
 #
-#   org_sweep.sh                          # every repo in the default orgs
-#   org_sweep.sh --orgs dotCMS            # one org
-#   org_sweep.sh --repos dotCMS/support   # named repos only
+#   org_sweep.sh --orgs your-org          # every repo in one org
+#   org_sweep.sh --orgs org-a,org-b       # several orgs
+#   org_sweep.sh --repos your-org/your-repo   # named repos only
 #   org_sweep.sh --local /path/to/repo    # an existing clone, no network
-#   org_sweep.sh --deep                   # every commit, not just ref tips (slow)
+#   org_sweep.sh --orgs your-org --deep   # every commit, not just ref tips (slow)
 #
 # Token: $GH_TOKEN, $GITHUB_TOKEN, or `gh auth token`. NOT argv - a token on the
 # command line is visible to every user on the box via ps.
@@ -46,7 +46,7 @@
 
 set -uo pipefail
 
-ORGS="dotCMS dotcms-community"
+ORGS=""
 REPOS_ARG=""
 LOCAL_PATH=""
 DEEP=0
@@ -66,6 +66,16 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+# One of --orgs/--repos/--local is required; there is deliberately no default
+# org. A bare run used to sweep dotCMS's own orgs, which is the wrong blast
+# radius for a tool we hand to the public. The guard is not cosmetic: with no
+# default and no guard the org loop iterates zero times, enumerates nothing,
+# and the run exits 0 -- a green sweep of no repositories.
+if [ -z "$LOCAL_PATH" ] && [ -z "$REPOS_ARG" ] && [ -z "$ORGS" ]; then
+  echo "nothing to sweep: pass --orgs, --repos or --local (see --help)" >&2
+  exit 2
+fi
 
 # --- indicators -------------------------------------------------------------
 # Defined in rules.sh, never here. They used to live in this file and in
@@ -360,10 +370,15 @@ else
     # type=all so private repos are included; --paginate so nothing is capped.
     gh api "orgs/$o/repos?per_page=100&type=all" --paginate \
        --jq '.[] | select(.archived == false) | .full_name' >> "$REPO_LIST" 2>/dev/null \
-      || skip "could not enumerate org $o - its repos are NOT covered by this run"
+      || { skip "could not enumerate org $o - its repos are NOT covered by this run"; ENUM_FAILED=1; }
   done
 fi
-NREPOS=$(wc -l < "$REPO_LIST" | tr -d ' ')
+# Non-blank lines, not wc -l: `--repos ,` writes one empty line and would count
+# as a repo.
+NREPOS=$(grep -c . "$REPO_LIST" || true)
+# A typo'd --orgs, `--orgs ,`, or an org the token cannot see leaves nothing to
+# sweep, and the loop below would then exit 0 having looked at nothing.
+[ "$NREPOS" -gt 0 ] || { rm -f "$REPO_LIST"; die "0 repositories to sweep from: ${ORGS:-$REPOS_ARG} - nothing was checked"; }
 note "sweeping $NREPOS repo(s) from: $ORGS   (archived repos excluded)"
 
 while IFS= read -r full; do
@@ -392,8 +407,11 @@ N_SUS=$(grep -c '^SUSPICIOUS$'  "$VERDICTS" || true)
 echo
 echo "SWEEP COMPLETE: $NREPOS requested | $N_CLN with no ref hits | $N_EMP empty | $N_SUS shape-only | $N_INF infected | $N_UNK not scanned"
 coverage_note
+[ "${ENUM_FAILED:-0}" -eq 1 ] && echo "INCOMPLETE: at least one org could not be enumerated - see SKIP above"
 # UNKNOWN is not clean. A repo that failed to clone or whose engine errored has
-# been proven nothing, and saying so is the whole point of the exit codes.
+# been proven nothing, and saying so is the whole point of the exit codes. An
+# org that could not be listed is the same thing, one level up.
 [ "$N_INF" -gt 0 ] && exit 1
 [ "$N_UNK" -gt 0 ] && exit 2
+[ "${ENUM_FAILED:-0}" -eq 1 ] && exit 2
 exit 0

@@ -1,9 +1,10 @@
 # Incident Report — DPRK "PolinRider" Supply-Chain Implant in GitHub Repositories
 
-**Classification:** Confidential — Incident Response
+**Classification:** Public copy — sanitized for release
 **Date of report:** 2026-08-25
 **Severity:** Critical (malicious commits on default branches of two repositories; credential-theft malware with backdoor capability)
-**Status:** Containment in progress (a second affected repository still carried the implant at time of writing; details withheld from the public copy — see internal IR record)
+**Status as of this document's date:** Containment in progress (a second affected repository still carried the implant at time of writing; details withheld from the public copy — see internal IR record)
+**Current status:** This document is a point-in-time snapshot from 2026-08-25 and is not maintained. For the current position, see the dotCMS trust center: <https://security.dotcms.com/updates>
 
 ---
 

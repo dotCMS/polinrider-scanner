@@ -237,6 +237,37 @@ R=$(mkrepo genuinelyempty)
 OUT=$(bash "$SWEEP" --local "$R" 2>&1); RC=$?
 check "empty repo verdict" "$(echo "$OUT" | grep -c 'RESULT .* EMPTY')" "1"
 check "empty repo exit code" "$RC" "0"
+echo "== 13. a bare run refuses to sweep anything =="
+# There is deliberately no default org. Without the guard the org loop iterates
+# zero times, enumerates nothing and exits 0 -- a green run that looked at no
+# repositories. Asserting on the message, not just the exit code: a missing
+# token also exits 2, and a test that cannot tell those apart passes for the
+# wrong reason.
+OUT=$(bash "$SWEEP" 2>&1); RC=$?
+check "exit code" "$RC" "2"
+echo "$OUT" | grep -q 'nothing to sweep' && ok "guard fired, not the token check" || bad "bare run did not hit the guard"
+echo "$OUT" | grep -qE 'RESULT |SWEEP COMPLETE' && bad "a bare run produced sweep output" || ok "no sweep performed"
+
+echo "== 14. an org that cannot be listed is not a clean run =="
+# Case 13 proves an argument was passed, not that anything was swept. A typo'd
+# --orgs used to print SKIP, sweep 0 repos and exit 0. Offline: a stub gh lists
+# org 'good' and fails for anything else, and insteadOf points the clone URL
+# at a local bare repo.
+mkdir -p "$TMP/bin" "$TMP/gh/good"
+printf '#!/bin/sh\ncase "$*" in *orgs/good/*) echo good/r ;; *) exit 1 ;; esac\n' > "$TMP/bin/gh"; chmod +x "$TMP/bin/gh"
+R=$(mkrepo goodsrc); printf 'x\n' > "$R/a.js"; commit "$R"
+git clone -q --bare "$R" "$TMP/gh/good/r.git"
+offline() { PATH="$TMP/bin:$PATH" GH_TOKEN=stub GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0="url.file://$TMP/gh/.insteadOf" GIT_CONFIG_VALUE_0="https://x-access-token:stub@github.com/" \
+  bash "$SWEEP" "$@" 2>&1; }
+for args in "--orgs zz-no-such-org-qq81" "--orgs ," "--repos ,"; do
+  OUT=$(offline $args); RC=$?
+  check "$args exit code" "$RC" "2"
+  echo "$OUT" | grep -q '0 repositories to sweep' && ok "$args refused: nothing to sweep" || bad "$args did not refuse"
+done
+OUT=$(offline --orgs good,zz-no-such-org-qq81); RC=$?
+check "good org still swept" "$(echo "$OUT" | grep -c 'RESULT good/r NO_REF_HITS')" "1"
+check "one org unlisted: exit code" "$RC" "2"
 
 echo
 echo "PASS: $PASS   FAIL: $FAIL"
